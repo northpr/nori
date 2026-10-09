@@ -132,7 +132,17 @@ docs/                 setup-guide, tech-stack, recommendations, troubleshooting,
 ## Updating later
 `git pull` on your laptop (your `nori.conf`, `profile/USER.md`, `local/` and `SETUP-PROGRESS.md` are gitignored), copy the repo to the server (`rsync -a --exclude .git --exclude generated ./ <server>:nori/`), then on the server `cd ~/nori && ./setup.sh` (add `--restart` if rules or settings changed). Claude Code itself is pinned to a tested version and doesn't update itself; upgrade it on purpose with `CLAUDE_CODE_VERSION` in `nori.conf`. Details in `docs/setup-guide.md`.
 
-## Safety model in short
+## 🔒 Security
+**Found a security problem?** Please report it privately: this repo's **Security** tab → **Report a vulnerability** ([SECURITY.md](SECURITY.md)). Don't open a public issue, and never paste real tokens, keys or passwords anywhere.
+
+In short:
+- **Your keys stay yours.** `./nori up` asks for each key with hidden typing, sends it only to your own server (over SSH, never on a command line), and saves none of them on your laptop. The Hetzner token is used once and forgotten. Keys never go into git, `nori.conf` or a chat with Claude.
+- **Your server is locked down.** Firewall closed except SSH (key-only, no root login) and the private Tailscale network. The admin has only limited passwordless sudo; each Claude session runs as its own user with no sudo.
+- **Risky actions ask you first.** `git push`, PR merges and anything you add to `EXTRA_ASK_PERMISSIONS` always need your 🔐 approval, even in auto mode.
+- **Protect your Telegram account** with two-step verification: it's the remote control for your server.
+- **This repo:** GitHub secret scanning and push protection are on, `main` and `develop` only change through reviewed pull requests with passing tests, and the tests block personal data from being committed.
+
+### Safety model in detail
 Who can do what:
 - **Your Telegram account** is the remote control. Whoever gets into it can tell the area sessions to run code as the area users, approve their 🔐 pushes and merges, and use the Ops bot (`/apply` re-runs `setup.sh` as the admin, `/restart <area>`). **Turn on Telegram's two-step verification** (Settings → Privacy and Security → Two-Step Verification, a cloud password).
 - **The admin account** (`ADMIN_USER`, your SSH login) runs `setup.sh`, cron and the Ops bot. With `ADMIN_SUDO=limited` (the default) it may act as the area users and run the small root helper `nori-root` without a password; anything else as root asks for the admin's password. So a stolen Telegram account or a bug in the Ops bot doesn't mean passwordless root. `ADMIN_SUDO=full` is passwordless root for everything. `limited` needs classic sudo; on Ubuntu 26.04 (`sudo-rs`) bootstrap keeps `full` until it's tested there. With `PLANE=true` the admin is also in the `docker` group, which is as good as root; `limited` doesn't change that.
