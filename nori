@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+# nori: laptop-side helper for setting up a Nori server.
+#   ./nori up                       create a Hetzner server and set it up (asks for every key first)
+#   ./nori up --host 1.2.3.4        set up an existing Ubuntu 24.04+ server instead
+#   ./nori up --add tailscale       later: add Tailscale (previews, Plane) to the server you already have
+#   options: --type cax21 --location nbg1
+# Keys are asked once with hidden typing, sent only to the server, never saved here.
+import argparse
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO / "scripts"))
+from nori import stages  # noqa: E402
+
+p = argparse.ArgumentParser(prog="nori")
+sub = p.add_subparsers(dest="cmd", required=True)
+up = sub.add_parser("up", help="create/set up the server")
+up.add_argument("--host")
+up.add_argument("--type", dest="type_")
+up.add_argument("--location")
+up.add_argument("--add", choices=["tailscale"], help="add an optional piece to the existing server")
+a = p.parse_args()
+if a.add and a.host:
+    p.error("--add works on the server Nori already set up; don't combine it with --host")
+sys.exit(stages.run_up(REPO, host=a.host, type_=a.type_, location=a.location, add=a.add))

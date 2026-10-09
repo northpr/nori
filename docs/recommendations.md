@@ -16,6 +16,7 @@ Difficulty: 🟢 easy (minutes) · 🟡 medium (half an hour) · 🔴 more work 
 | [ ] | Git identity follows the repo owner | personal repos commit as you, company repos with your work email; a guard blocks mix-ups | `GITHUB_ACCOUNTS` | 🟢 |
 | [ ] | Put your profile in `USER.md` | every session knows who you are, how you like answers, your tools | `profile/USER.md` | 🟢 10 min |
 | [ ] | Keep secrets out of git and chats | tokens only on the server, via `set-token`; nothing to leak if a repo goes public | habit (+ `.gitignore`) | 🟢 |
+| [ ] | Encrypted nightly backup of your work | a dead server doesn't take unpushed work with it (commits, uncommitted changes, handoff notes, skills) | `WORK_BACKUP=true` + `BACKUP_REPO`; `AREA_work_WORK_BACKUP=false` for company code (unless the backup repo is the company's) | 🟢 store the passphrase! |
 | [ ] | Tailscale on server, phone and laptop | private links (previews, Plane) and SSH without opening ports | `setup-guide.md` step 4 | 🟢 |
 
 ## Nice-to-have
@@ -23,6 +24,8 @@ Difficulty: 🟢 easy (minutes) · 🟡 medium (half an hour) · 🔴 more work 
 |---|---|---|---|---|
 | [ ] | Ops bot | `/status`, `/progress`, `/restart`, alerts when something dies or RAM runs low, works even when Claude is stuck | `OPS_BOT=true` (recommended) | 🟢 one more bot |
 | [ ] | Daily digest | one message each morning: repos, open PRs, what needs you | `DIGEST=true`, `DIGEST_TIME` | 🟢 |
+| [ ] | `/usage` and `/recall` | token use per area and your plan-limit % (5h / weekly, from the status line); search past chats, handoffs and tickets from the chat | `OPS_BOT=true` (`/recall` needs `RECALL=true`) | 🟢 |
+| [ ] | Tap-to-answer buttons and "still on it" pings | Claude's A/B questions arrive as buttons; long tasks ping you so you know nothing died; an alert if the chat bot's Telegram connection goes quiet | `OPS_BOT=true` | 🟢 |
 | [ ] | `/ask` | ask the server questions ("why is RAM high?") without SSH | `OPS_ASK=true` | 🟢 |
 | [ ] | Pool sessions for deep work | start extra Claude sessions from the Claude app for long, parallel tasks; keep the chat bot for quick ones | `POOL_SESSIONS=true`, `POOL_CAPACITY=4` + one-time consent | 🟢 |
 | [ ] | Use `plan:` before big changes | Claude proposes a plan first, you say go; fewer surprises in big refactors | habit: start the message with `plan:` | 🟢 |
@@ -40,7 +43,9 @@ Difficulty: 🟢 easy (minutes) · 🟡 medium (half an hour) · 🔴 more work 
 | [ ] | Keep decisions in tickets | the ticket is the record: questions, answers, branch, PR, "Done:" summary | habit (with Plane) | 🟢 |
 | [ ] | Involvement labels | 🤖 auto tickets get done on their own; ⚡/🧠 ones wait for you, and the digest lists them | habit (with Plane) | 🟢 |
 | [ ] | Ticket intake from others | teammates send `/ticket` to the Ops bot; Claude triages, you accept | `/allow` in the Ops bot | 🟢 |
-| [ ] | Encrypted off-site backups of Plane | a dead server doesn't take your tickets with it | `PLANE_OFFSITE_BACKUP=true`, `PLANE_BACKUP_REPO` | 🟡 store the passphrase! |
+| [ ] | ▶️ Do it on ticket cards | one tap on a ticket card tells the area session to start that ticket | `PLANE=true` + `OPS_BOT=true` | 🟢 |
+| [ ] | Work members and work groups | `/allow <id> <name> <area>` lets a teammate use one area only; `/workgroup <area>` binds a group chat to an area | Ops bot commands | 🟢 |
+| [ ] | Encrypted off-site backups of Plane | a dead server doesn't take your tickets with it | `PLANE_OFFSITE_BACKUP=true`, `BACKUP_REPO` | 🟡 store the passphrase! |
 | [ ] | Close public SSH | only the tailnet can reach the box | `sudo ufw delete allow 22/tcp` (after Tailscale works) | 🟡 careful |
 | [ ] | Your own rules and skills | teach the sessions your conventions once | `local/rules/*.md`, `local/skills/` | 🟡 |
 

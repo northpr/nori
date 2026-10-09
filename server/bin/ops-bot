@@ -18,7 +18,10 @@ Commands (only from allowed users, DM or the ops group):
   /progress               what each Claude session is doing right now
   /restart <area>         restart that Claude session (wipes its conversation)
   /apply                  re-run setup.sh from ~/nori (no git pull; the laptop rsyncs updates)
+  /usage                  plan limit % (5h / week) and tokens per area
+  /recall [AREA:] WORDS   search past chats, tickets and handoff notes (RECALL=true); AREA: or its first letter narrows it
   /ask QUESTION           Claude (Sonnet, no tools) answers from read-only facts the bot collects (OPS_ASK=true)
+  (PERM_CARDS=true) a 🔐 permission prompt in a session is posted to the ops chat within ~15 s with Allow/Deny buttons
   /here                   send alerts and the daily digest to this chat
   /whoami                 show your Telegram user id (works for anyone)
   With PLANE=true also:
@@ -26,9 +29,15 @@ Commands (only from allowed users, DM or the ops group):
   /peek ID                one ticket up close (description, labels, latest comments, link)
   /ticket TEXT            new ticket (owner or people added with /allow); Claude triages, owner accepts/rejects
   /allow ID NAME PROJ,..  /revoke NAME|ID  /people   who may send /ticket
+  /allow ID NAME AREA     a "member" of an area (private chat): /ticket /mytickets /board /peek for that area's projects
+  /workgroup AREA|off     (owner, inside a group) bind it to an area: members + owner get member commands there
   /help
+Also: `ask-owner` (run by a Claude session) becomes a message with one button per option; a tap is typed into that session.
+Alerts: "still on it" pings for long silent work, Telegram inbox check, ticket updates for members.
 """
 import calendar
+import datetime
+import hashlib
 import html
 import json
 import os
@@ -48,14 +57,19 @@ from pathlib import Path
 HOME = Path.home()
 
 
-def chat_process_pattern():
-    """pgrep -f pattern for the chat bot, from chat/<CHAT>/platform.conf (default: the Telegram bun process)."""
+def platform_value(key, default=""):
+    """One KEY from chat/<CHAT>/platform.conf (plain KEY="value" lines), else default."""
     try:
         text = (NORI_DIR / "chat" / CONF.get("CHAT", "telegram") / "platform.conf").read_text()
     except OSError:
-        return "bun.*telegram"
-    m = re.search(r'^CHAT_PROCESS_PATTERN=(?:"([^"]*)"|\'([^\']*)\'|(\S*))', text, re.M)
-    return (m and next(g for g in m.groups() if g is not None)) or "bun.*telegram"
+        return default
+    m = re.search(rf'^{key}=(?:"([^"]*)"|\'([^\']*)\'|(\S*))', text, re.M)
+    return (m and next(g for g in m.groups() if g is not None)) or default
+
+
+def chat_process_pattern():
+    """pgrep -f pattern for the chat bot (default: the Telegram bun process)."""
+    return platform_value("CHAT_PROCESS_PATTERN", "bun.*telegram")
 
 
 def load_conf():
@@ -77,7 +91,9 @@ CONF = load_conf()
 SERVER = CONF.get("SERVER_NAME", "nori-server")
 PLANE_ON = CONF.get("PLANE") == "true"
 ASK_ON = CONF.get("OPS_ASK", "true") == "true"
+PERM_ON = CONF.get("PERM_CARDS", "true") == "true"
 POOL_ON = CONF.get("POOL_SESSIONS", "true") == "true"
+RECALL_ON = CONF.get("RECALL") == "true"
 NORI_DIR = Path(os.environ.get("NORI_ROOT", HOME / "nori"))
 CHAT_PROCESS_PATTERN = chat_process_pattern()
 ENV_FILE = HOME / ".ops-bot.env"
@@ -98,6 +114,23 @@ def area_home(area):
 
 
 INSTANCES = {a: area_home(a) / ".claude/channels" / f"telegram-{a}" for a in AREAS}
+IS_TELEGRAM = CONF.get("CHAT", "telegram") == "telegram"
+# The chat plugin's name ("telegram@claude-plugins-official" -> "telegram") gives the channel source tag in the
+# session transcript and the names of its reply tools.
+PLUGIN = platform_value("CHAT_PLUGIN").split("@")[0]
+CHANNEL_SOURCE = f"plugin:{PLUGIN}:{PLUGIN}" if PLUGIN else ""
+REPLY_TOOLS = (f"mcp__plugin_{PLUGIN}_{PLUGIN}__reply", f"mcp__plugin_{PLUGIN}_{PLUGIN}__edit_message") if PLUGIN else ()
+
+
+def _zone():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(CONF.get("TIMEZONE", "UTC"))
+    except Exception:   # unknown name or no tzdata: fall back to UTC
+        return datetime.timezone.utc
+
+
+TZ = _zone()
 AREA_CHOICES = "|".join(AREAS)
 PLANE_DIR = HOME / "plane"
 BACKUP_DIR = HOME / "backups/plane"
@@ -224,8 +257,9 @@ def health():
 def status_text():
     h = health()
     lines = [f"🖥 {SERVER}"]
+    inbox = live_counts()
     for k, ok in h.items():
-        lines.append(f"{'✅' if ok else '❌'} {k}")
+        lines.append(f"{'✅' if ok else '❌'} {k}" + (f" · inbox {inbox[k.split()[1]]}" if k.startswith("telegram ") and k.split()[1] in inbox else ""))
     _, up = sh("uptime", "-p")
     _, mem = sh("free", "-h")
     m = mem.splitlines()[1].split() if mem else []
@@ -234,6 +268,10 @@ def status_text():
     if m:
         lines.append(f"🧠 RAM {m[2]} used / {m[1]} (avail {m[6]})")
     lines.append(f"💾 disk {du.used // 2**30}G / {du.total // 2**30}G")
+    try:
+        lines.append(claude_version_line(wanted_claude_version(), claude_versions(wanted_claude_version())))
+    except Exception as e:
+        lines.append(f"🤖 Claude Code version unknown ({e})")
     if PLANE_ON:
         backups = sorted(BACKUP_DIR.glob("plane-*.sql.gz"))
         if backups:
@@ -264,22 +302,211 @@ def check():
                        + ("or /ask what is using memory?" if ASK_ON else "check `free -h` and `top`"))
         send(ops_chat(), "\n".join(msg))
     hfile.write_text(json.dumps(h))
+    # prsync runs from its own cron line (`ops-bot prsync`)
+    for job in (remind_permissions, still_on_it, chat_live, claude_version_check, member_updates):
+        if job is member_updates and not PLANE_ON:
+            continue
+        try:
+            job()
+        except Exception as e:
+            print(f"{job.__name__} failed: {e}", file=sys.stderr, flush=True)
+
+
+# ---------- Claude Code version drift (self-updates are off; setup.sh installs the wanted version) ----------
+CC_FILE = HOME / ".ops-bot.claude-version.json"   # cache + last alert; separate from the bot's state like the health file
+CC_TTL = 3600                                     # `claude --version` per user at most hourly
+CC_EXACT = re.compile(r"\d+\.\d+\.\d+")
+
+
+def wanted_claude_version():
+    """CLAUDE_CODE_VERSION from nori.resolved.conf (already resolved from server/claude-code.version), else the repo file."""
+    v = CONF.get("CLAUDE_CODE_VERSION", "").strip()
+    if not v:
+        try:
+            v = (NORI_DIR / "server/claude-code.version").read_text().strip()
+        except OSError:
+            v = ""
+    return v
+
+
+def parse_claude_version(out):
+    """'2.1.281 (Claude Code)' -> '2.1.281'; anything else -> None."""
+    first = (out or "").strip().split()[:1]
+    return first[0] if first and CC_EXACT.fullmatch(first[0]) else None
+
+
+def _vkey(v):
+    return tuple(int(x) for x in v.split("."))
+
+
+def claude_drift(wanted, versions):
+    """[(user, version)] that differ from an exact wanted version. stable/latest or unknown versions never count."""
+    if not CC_EXACT.fullmatch(wanted or ""):
+        return []
+    return sorted((u, v) for u, v in versions.items() if v and v != wanted)
+
+
+def claude_version_alert(prev_sig, wanted, versions):
+    """(new signature, message or None): alert once when the drift changes, and once when it is gone."""
+    drift = claude_drift(wanted, versions)
+    sig = f"{wanted}|" + ",".join(f"{u}={v}" for u, v in drift) if drift else ""
+    if sig == prev_sig:
+        return sig, None
+    if drift:
+        newer = [v for _, v in drift if _vkey(v) > _vkey(wanted)]
+        fix = ("Older ones: run ./setup.sh on the server (then ./setup.sh --restart). " if len(newer) < len(drift) else "")
+        if newer:
+            fix += (f"Newer ones: setup.sh never downgrades on its own; keep it with CLAUDE_CODE_VERSION={max(newer, key=_vkey)} "
+                    f"in nori.conf, or go back with CLAUDE_CODE_VERSION={wanted} and ./setup.sh.")
+        return sig, (f"⚠️ {SERVER}: Claude Code is not the wanted version {wanted}:\n"
+                     + "\n".join(f"❌ {u}: {v}" for u, v in drift)
+                     + "\nSomething changed it outside setup.sh. " + fix)
+    return sig, (f"✅ {SERVER}: Claude Code is back on {wanted} everywhere" if prev_sig else None)
+
+
+def claude_version_line(wanted, versions):
+    have = sorted({v for v in versions.values() if v})
+    pinned = bool(CC_EXACT.fullmatch(wanted or ""))
+    if pinned and have == [wanted] and all(versions.values()):
+        return f"🤖 Claude Code {wanted} (pinned)"
+    detail = ", ".join(f"{u} {v or '?'}" for u, v in versions.items()) or "no users found"
+    return f"🤖 Claude Code: {detail} (wanted: {wanted or '?'})"
+
+
+def _cc_load():
     try:
-        remind_permissions()
-    except Exception as e:   # prsync runs from its own cron line (`ops-bot prsync`)
-        print(f"remind_permissions failed: {e}", file=sys.stderr, flush=True)
+        return json.loads(CC_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _cc_save(data):
+    tmp = CC_FILE.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(CC_FILE)
+
+
+def claude_versions(wanted, refresh=False):
+    """{user: version or None} for the admin and each configured area; cached for CC_TTL seconds
+    (and refreshed when the wanted version changed, i.e. after a deliberate upgrade)."""
+    data = _cc_load()
+    if (not refresh and time.time() - data.get("ts", 0) < CC_TTL and data.get("wanted") == wanted
+            and isinstance(data.get("versions"), dict)):
+        return data["versions"]
+    env = dict(os.environ, PATH=f"{HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin")
+    try:
+        out = subprocess.run([str(HOME / ".local/bin/claude"), "--version"], capture_output=True, text=True,
+                             timeout=30, cwd="/tmp", env=env).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        out = ""
+    import getpass
+    versions = {getpass.getuser(): parse_claude_version(out)}
+    for area in AREAS:
+        if configured(area):
+            versions[area] = parse_claude_version(as_user(area, str(area_home(area) / ".local/bin/claude"), "--version",
+                                                          timeout=30, cwd="/tmp")[1])
+    data.update(ts=time.time(), wanted=wanted, versions=versions)
+    _cc_save(data)
+    return versions
+
+
+def claude_version_check():
+    wanted = wanted_claude_version()
+    prev = _cc_load().get("alerted", "")
+    sig, msg = claude_version_alert(prev, wanted, claude_versions(wanted))
+    if sig != prev:   # about to alert: make sure it isn't a stale cache
+        sig, msg = claude_version_alert(prev, wanted, claude_versions(wanted, refresh=True))
+    data = _cc_load()
+    if msg and ops_chat():
+        send(ops_chat(), msg)
+    if sig != data.get("alerted", ""):
+        data["alerted"] = sig
+        _cc_save(data)
 
 
 # ---------- what each Claude session is doing (read from its tmux screen) ----------
-def session_state(area):
-    """('down'|'permission'|'working'|'idle', detail)"""
+def _screen_tail(area):
+    """Last 30 non-blank lines of the area's tmux pane, or None when the session is down."""
     rc, out = as_user(area, "tmux", "-L", f"claude-{area}", "capture-pane", "-p", "-t", f"claude-{area}")
     if rc != 0:
+        return None
+    return [l.rstrip() for l in out.splitlines() if l.strip()][-30:]
+
+
+PERM_OPT = re.compile(r"❯\s*1\.\s*Yes")
+_BOX = "│╭╮╰╯─┃┌┐└┘ \t"
+
+
+PERM_Q = "Do you want to proceed?"
+_PERM_OPT_LINE = re.compile(r"^(❯\s*)?\d\.\s+\S")
+_PERM_FOOTER = re.compile(r"esc to cancel|tab to amend|ctrl\+e to explain|enter to confirm", re.I)
+
+
+def _perm_anchor(lines):
+    """Index of the question line when the live permission dialog is the bottom-most thing on screen, else None.
+    Strict: question line, then the numbered options (first is '1. Yes'), then only the dialog's own footer
+    or box-drawing leftovers. Anything else after it (new output, a prompt, chat text) means it is not live."""
+    q = None
+    for i, l in enumerate(lines):
+        if l.strip(_BOX).strip() == PERM_Q:
+            q = i
+    if q is None:
+        return None
+    opts = 0
+    for l in lines[q + 1:]:
+        t = l.strip(_BOX).strip()
+        if not t:
+            continue
+        if _PERM_OPT_LINE.match(t) and not _PERM_FOOTER.search(t):
+            if opts == 0 and not re.match(r"^(❯\s*)?1\.\s*Yes", t):
+                return None
+            opts += 1
+            continue
+        if opts and _PERM_FOOTER.search(t):
+            continue
+        return None
+    return q if opts >= 2 else None
+
+
+def has_perm_prompt(text):
+    lines = text if isinstance(text, list) else text.splitlines()
+    return _perm_anchor(lines) is not None
+
+
+# divider rows and the "ask rule" footer inside the dialog: not worth showing on the card
+_PERM_NOISE = re.compile(r"^[╌─━┄┈┅\-]{3,}$|^Ask rule |^/permissions to ")
+
+
+def perm_prompt(tail):
+    """(detail, hash) of the permission prompt in these lines: the dialog's own lines above the question (tool
+    and command), cleaned and capped at 700 chars, and a short hash of that plus the option lines."""
+    anchor = _perm_anchor(tail)
+    if anchor is None:
+        return "", ""
+    body = []
+    for j in range(anchor - 1, max(anchor - 20, -1), -1):
+        raw = tail[j].strip()
+        # stop at the dialog's top edge, or at session output above it (tool line, prompt, chat message)
+        if raw.startswith(("╭", "┌", "●", "⏺", "⎿", "❯", "←", "✻")):
+            break
+        line = raw.strip(_BOX).strip()
+        if line and not _PERM_NOISE.match(line):
+            body.insert(0, line)
+    opts = [t.strip(_BOX).strip().lstrip("❯").strip() for t in tail[anchor:anchor + 7]]
+    opts = [o for o in opts if re.match(r"\d\.\s", o)]
+    shown = [b for b in body if "Do you want" not in b]
+    detail = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", "\n".join(shown))[:700].strip()
+    h = hashlib.sha1("\n".join(body + opts).encode()).hexdigest()[:10]
+    return detail, h
+
+
+def session_state(area):
+    """('down'|'permission'|'working'|'idle', detail)"""
+    tail = _screen_tail(area)
+    if tail is None:
         return "down", ""
-    lines = [l.rstrip() for l in out.splitlines() if l.strip()]
-    tail = lines[-30:]
     blob = "\n".join(tail)
-    if "Do you want to proceed?" in blob or re.search(r"❯\s*1\.\s*Yes", blob):
+    if has_perm_prompt(blob):
         cmd = next((l.strip().lstrip("│").strip() for l in tail if l.strip().startswith("│")), "")
         return "permission", cmd[:200]
     activity = next((l.strip() for l in reversed(tail) if re.match(r"^\s*[●⏺✻✶✳✢·]\s", l)), "")
@@ -287,6 +514,17 @@ def session_state(area):
     if "esc to interrupt" in footer:
         return "working", activity[:160]
     return "idle", activity[:160]
+
+
+def perm_info(area):
+    """('down'|'permission'|'other', detail, hash) from ONE screen capture; detail/hash only for 'permission'."""
+    tail = _screen_tail(area)
+    if tail is None:
+        return "down", "", ""
+    if has_perm_prompt("\n".join(tail)):
+        d, h = perm_prompt(tail)
+        return "permission", d, h
+    return "other", "", ""
 
 
 def progress_text():
@@ -298,10 +536,181 @@ def progress_text():
         st, detail = session_state(area)
         out.append(f"{AREA_ICONS[i % len(AREA_ICONS)]} {area}: {icon[st]}")
         if st == "permission":
-            out.append(f"   wants to run: {detail}\n   👉 open your DM with the {area} bot and tap Allow (or Deny)")
+            where = "tap Allow / Deny on the card above, or in your DM with the {a} bot" if PERM_ON else "open your DM with the {a} bot and tap Allow (or Deny)"
+            out.append(f"   wants to run: {detail}\n   👉 " + where.format(a=area))
         elif detail:
             out.append(f"   {detail}")
     return "\n".join(out) or "No Claude sessions configured."
+
+
+# ---------- "still on it" pings: busy for a while, no reply to the owner lately ----------
+STILL_QUIET = 600     # s since the owner's last message AND since the session's last chat reply
+STILL_EVERY = 900     # s between pings per area
+STILL_FILE = HOME / ".ops-bot.still.json"
+
+
+def _ts(s):
+    try:
+        return calendar.timegm(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _step(name, inp):
+    """Short description of a tool call: 'Bash: go test ./...', 'Edit: path/file.go'."""
+    inp = inp if isinstance(inp, dict) else {}
+    val = inp.get("command") or inp.get("file_path") or inp.get("pattern") or inp.get("description") or inp.get("query") or ""
+    val = " ".join(str(val).split())
+    short = name.split("__")[-1]
+    return f"{short}: {val}"[:60] if val else short
+
+
+def is_inbound(text):
+    """Is this user turn a message from the chat? Claude Code wraps channel messages in <channel source="...">;
+    match the configured plugin's tag, or any channel tag when the plugin is unknown."""
+    head = text.lstrip()[:200]
+    return head.startswith("<channel source=") and (not CHANNEL_SOURCE or CHANNEL_SOURCE in head or "plugin:" not in head)
+
+
+def transcript_facts(raw):
+    """From transcript JSONL text -> (last owner msg ts, last chat reply ts, last step). ts 0 = none seen."""
+    inbound = reply = 0
+    step = ""
+    for line in raw.splitlines():
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        content = (o.get("message") or {}).get("content")
+        t = _ts(o.get("timestamp"))
+        if o.get("type") == "user" and not o.get("isSidechain"):
+            text = content if isinstance(content, str) else "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
+            if is_inbound(text):
+                inbound = t
+        elif o.get("type") == "assistant" and isinstance(content, list):
+            for b in content:
+                if b.get("type") == "tool_use":
+                    if b.get("name") in REPLY_TOOLS:
+                        reply = t
+                    else:
+                        step = _step(b.get("name", ""), b.get("input"))
+    return inbound, reply, step
+
+
+def transcript_dir(area):
+    """Claude Code keeps a project's transcripts in ~/.claude/projects/<cwd with every non-alphanumeric turned into ->;
+    the area's session runs in ~/projects/<area> (see claude-session)."""
+    cwd = str(area_home(area) / "projects" / area)
+    return area_home(area) / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def area_transcript_tail(area, n=200):
+    return as_user(area, "bash", "-c", 'f=$(ls -t "$0"/*.jsonl 2>/dev/null | head -1); [ -n "$f" ] && tail -n "$1" "$f"',
+                   str(transcript_dir(area)), str(n), timeout=15)[1]
+
+
+def still_on_it():
+    """Called from cron: one short note per area when it's been busy and silent for a while."""
+    try:
+        last = json.loads(STILL_FILE.read_text())
+    except (OSError, ValueError):
+        last = {}
+    now = time.time()
+    for area in AREAS:
+        if not configured(area) or now - last.get(area, 0) < STILL_EVERY:
+            continue
+        if session_state(area)[0] != "working":
+            continue
+        inbound, reply, step = transcript_facts(area_transcript_tail(area))
+        if not inbound or now - inbound < STILL_QUIET or now - reply < STILL_QUIET or not ops_chat():
+            continue
+        mins = int((now - inbound) // 60)
+        send(ops_chat(), f"⏳ {area}: still on it · {mins} min" + (f" · {step}" if step else ""))
+        last[area] = now
+    STILL_FILE.write_text(json.dumps(last))
+
+
+# ---------- is the Telegram bot really receiving? (the plugin can give up polling while its process stays alive) ----------
+LIVE_FILE = HOME / ".ops-bot.live.json"
+LIVE_GAP = 240  # s between the two bad checks (cron runs every 5 min)
+# Runs AS the area user: reads its own token, prints only {"n": pending_update_count, "err": ...}; the token never leaves that process.
+# argv: token file, token key
+LIVE_PROBE = r"""
+import json, re, sys, urllib.request
+try:
+    tok = re.search(re.escape(sys.argv[2]) + r'=["\']?([^"\'\s]+)', open(sys.argv[1]).read()).group(1)
+    r = json.load(urllib.request.urlopen("https://api.telegram.org/bot" + tok + "/getWebhookInfo", timeout=10))["result"]
+    print(json.dumps({"n": int(r.get("pending_update_count") or 0), "err": str(r.get("last_error_message") or "")[:100]}))
+except Exception as e:
+    print(json.dumps({"n": None, "err": type(e).__name__}))
+"""
+
+
+def live_probe(area):
+    """{'n': pending count or None, 'err': short text}; never contains the token."""
+    token_file = INSTANCES[area] / platform_value("CHAT_TOKEN_FILE", ".env")
+    rc, out = as_user(area, "python3", "-I", "-c", LIVE_PROBE, str(token_file), platform_value("CHAT_TOKEN_KEY", "TELEGRAM_BOT_TOKEN"), timeout=25)
+    try:
+        r = json.loads(out.splitlines()[-1])
+        return {"n": r["n"] if isinstance(r["n"], int) else None, "err": str(r.get("err", ""))[:100]}
+    except (ValueError, IndexError, KeyError, TypeError):
+        return {"n": None, "err": "probe failed" if rc else "bad probe output"}
+
+
+def live_step(rec, probe, now):
+    """One check for one area -> (new rec, message or None). rec: bad streak, since, alerted, fails."""
+    rec = dict(rec)
+    if probe["n"] is None:
+        rec["fails"] = rec.get("fails", 0) + 1
+        if rec["fails"] == 3:
+            return rec, f"⚠️ can't check the bot inbox (3 checks failed: {probe['err'] or 'unknown'})"
+        return rec, None
+    rec["fails"] = 0
+    if probe["n"] == 0:
+        was = rec.get("alerted")
+        rec.update(bad=0, since=0, alerted=False)
+        return rec, ("✅ bot receiving again" if was else None)
+    if not rec.get("bad"):
+        rec["since"] = now
+    rec["bad"] = rec.get("bad", 0) + 1
+    if rec["bad"] >= 2 and now - rec["since"] >= LIVE_GAP and not rec.get("alerted"):
+        rec["alerted"] = True
+        return rec, f"⚠️ bot isn't receiving messages ({probe['n']} waiting)."
+    return rec, None
+
+
+def chat_live(sfile=None):
+    """Called from cron (Telegram only): alert when pending updates stay > 0 over two checks, once; say when it recovers."""
+    if not IS_TELEGRAM:
+        return
+    sfile = sfile or LIVE_FILE
+    try:
+        live = json.loads(sfile.read_text())
+    except (OSError, ValueError):
+        live = {}
+    now = time.time()
+    for area in AREAS:
+        if not configured(area):
+            continue
+        if not bot_running(area):  # down or restarting: the health check owns that
+            live[area] = {"n": 0}
+            continue
+        probe = live_probe(area)
+        rec, msg = live_step(live.get(area, {}), probe, now)
+        rec["n"] = probe["n"] if probe["n"] is not None else rec.get("n", 0)
+        live[area] = rec
+        if msg and ops_chat():
+            first, _, rest = msg.partition(" ")
+            send(ops_chat(), f"{first} {area} {rest}" + (f" /restart {area}" if first == "⚠️" and "receiving" in msg else ""))
+    sfile.write_text(json.dumps(live))
+
+
+def live_counts():
+    """{area: pending count} from the last cron check (cheap; no network)."""
+    try:
+        return {a: r["n"] for a, r in json.loads(LIVE_FILE.read_text()).items() if isinstance(r.get("n"), int)}
+    except (OSError, ValueError, AttributeError):
+        return {}
 
 
 def remind_permissions():
@@ -319,12 +728,181 @@ def remind_permissions():
         if st != "permission":
             perm.pop(area, None)
             continue
+        if PERM_ON and permwatch_alive() and area in permwatch_posted():
+            continue  # the live watcher already posted this prompt with buttons
         cur = perm.get(area) or {"since": now, "reminded": False}
         if not cur["reminded"] and now - cur["since"] >= 300 and ops_chat():
             send(ops_chat(), f"🔐 {area} has been waiting {int((now - cur['since']) // 60)} min for your approval:\n{detail}\n👉 check your DM with the {area} bot")
             cur["reminded"] = True
         perm[area] = cur
     pfile.write_text(json.dumps(perm))
+
+
+# ---------- instant 🔐 cards in the ops chat, with Allow / Deny buttons (PERM_CARDS=true) ----------
+PERMWATCH_FILE = HOME / ".ops-bot.permwatch.json"
+PERMWATCH_EVERY = 15      # s between screen checks
+PERMWATCH_FRESH = 120     # s: the cron reminder trusts the watcher if its file is this fresh
+PERM_LOCK = threading.Lock()
+PERM = {}                 # area -> {"hash","mid","chat","text","at","busy"?}; mirrored in PERMWATCH_FILE
+_perm_loaded = False
+PERM_DATA = re.compile(r"perm:([A-Za-z0-9_-]+):([0-9a-f]{10}):([yn])")
+
+
+def _perm_load():
+    global _perm_loaded
+    if _perm_loaded:
+        return
+    _perm_loaded = True
+    try:
+        data = json.loads(PERMWATCH_FILE.read_text()).get("prompts", {})
+        PERM.update({a: {k: v for k, v in p.items() if k != "busy"} for a, p in data.items() if isinstance(p, dict)})
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _perm_save():
+    tmp = PERMWATCH_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"prompts": {a: {k: v for k, v in p.items() if k != "busy"} for a, p in PERM.items()}}))
+    tmp.replace(PERMWATCH_FILE)
+
+
+def permwatch_alive():
+    try:
+        return time.time() - PERMWATCH_FILE.stat().st_mtime < PERMWATCH_FRESH
+    except OSError:
+        return False
+
+
+def permwatch_posted():
+    try:
+        return set(json.loads(PERMWATCH_FILE.read_text()).get("prompts", {}))
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def perm_data(area, h, yn):
+    """callback_data of an Allow ('y') / Deny ('n') button (Telegram allows 64 bytes)."""
+    return f"perm:{area}:{h}:{yn}"
+
+
+def perm_keyboard(area, h):
+    return json.dumps({"inline_keyboard": [[{"text": "✅ Allow", "callback_data": perm_data(area, h, "y")},
+                                             {"text": "❌ Deny", "callback_data": perm_data(area, h, "n")}]]})
+
+
+def perm_text(area, detail):
+    return (f"🔐 {area} wants to run:\n{detail or '(no details visible)'}\n"
+            f"Tap below, or Allow in your DM with the {area} bot.")
+
+
+def same_prompt(st, now_hash, want_hash):
+    """True only if the screen still shows the live permission dialog (strict check) and it is the one the tap was for."""
+    return st == "permission" and bool(want_hash) and now_hash == want_hash
+
+
+def _perm_edit(p, suffix):
+    try:
+        api("editMessageText", chat_id=p["chat"], message_id=p["mid"], text=(p["text"] + "\n\n" + suffix)[:4000])
+    except Exception as e:
+        print(f"perm edit failed: {e}", file=sys.stderr, flush=True)
+
+
+def permwatch_tick(area):
+    st, detail, h = perm_info(area)
+    with PERM_LOCK:
+        cur = PERM.get(area)
+        if cur and cur.get("busy"):
+            return  # a button tap is handling it
+        if cur and not same_prompt(st, h, cur["hash"]):
+            PERM.pop(area, None)
+            _perm_save()
+            _perm_edit(cur, "✅ answered" if st != "permission" else "— no longer waiting")
+            cur = None
+        if st != "permission" or cur or not h:
+            return
+        chat = ops_chat()
+        if not chat:
+            return
+        text = perm_text(area, detail)
+        r = api("sendMessage", chat_id=chat, text=text, reply_markup=perm_keyboard(area, h))
+        PERM[area] = {"hash": h, "mid": r["result"]["message_id"], "chat": chat, "text": text, "at": int(time.time())}
+        _perm_save()
+
+
+def permwatch_loop():
+    _perm_load()
+    while True:
+        for area in AREAS:
+            try:
+                if configured(area):
+                    permwatch_tick(area)
+            except Exception as e:
+                print(f"permwatch {area} error: {e}", file=sys.stderr, flush=True)
+        try:
+            with PERM_LOCK:
+                _perm_save()  # heartbeat: mtime tells the cron reminder the watcher is alive
+        except Exception as e:
+            print(f"permwatch save error: {e}", file=sys.stderr, flush=True)
+        time.sleep(PERMWATCH_EVERY)
+
+
+def perm_send_key(area, key):
+    t = f"claude-{area}"
+    return as_user(area, "tmux", "-L", t, "send-keys", "-t", t, key)[0] == 0
+
+
+def perm_callback(cq):
+    """perm:<area>:<hash>:<y|n>. Keys are sent only if the same prompt is still on screen."""
+    cid = cq["id"]
+    m = PERM_DATA.fullmatch(cq.get("data", ""))
+    if not m or m.group(1) not in AREAS:
+        api("answerCallbackQuery", callback_query_id=cid, text="Bad button.")
+        return
+    area, h, yn = m.groups()
+    who = cq.get("from", {}).get("first_name") or "owner"
+    _perm_load()
+    with PERM_LOCK:  # the first handled tap wins
+        p = PERM.get(area)
+        if not p or p["hash"] != h or p.get("busy"):
+            gone = not p or p["hash"] != h
+            api("answerCallbackQuery", callback_query_id=cid, text="Already answered.")
+            msg = cq.get("message") or {}
+            if gone and msg.get("message_id"):
+                try:
+                    api("editMessageText", chat_id=msg["chat"]["id"], message_id=msg["message_id"],
+                        text=(msg.get("text") or "🔐")[:3900] + "\n\n— no longer waiting")
+                except Exception:
+                    pass
+            return
+        p["busy"] = True
+    try:
+        st, _, now_h = perm_info(area)
+        if not same_prompt(st, now_h, h):
+            api("answerCallbackQuery", callback_query_id=cid, text="Prompt changed, check the session. Nothing was pressed.", show_alert="true")
+            _perm_edit(p, "— prompt changed, check the session. Nothing was pressed.")
+            with PERM_LOCK:
+                PERM.pop(area, None)
+                _perm_save()
+            return
+        if not perm_send_key(area, "1" if yn == "y" else "Escape"):
+            api("answerCallbackQuery", callback_query_id=cid, text="Couldn't press the key.", show_alert="true")
+            with PERM_LOCK:
+                p.pop("busy", None)
+            return
+        api("answerCallbackQuery", callback_query_id=cid, text="Allowed" if yn == "y" else "Denied")
+        time.sleep(1.5)
+        st, _, now_h = perm_info(area)
+        if same_prompt(st, now_h, h):
+            _perm_edit(p, "pressed, but the prompt is still showing: check your DM")
+        else:
+            _perm_edit(p, f"{'✅ Allowed' if yn == 'y' else '❌ Denied'} by {who}")
+        with PERM_LOCK:
+            PERM.pop(area, None)   # if it is still on screen the watcher re-posts it next tick
+            _perm_save()
+    except Exception:
+        with PERM_LOCK:
+            p.pop("busy", None)
+        raise
 
 
 # ---------- tickets: intake from other people, triage by Claude, accept/reject by owner ----------
@@ -545,6 +1123,12 @@ def handle_callback(cq):
     if user not in ALLOWED or ":" not in data:
         api("answerCallbackQuery", callback_query_id=cq["id"], text="Only the owner can do this.")
         return
+    if data.startswith("ask:"):
+        return ask_callback(cq)
+    if data.startswith("do:"):
+        return doit_callback(cq)
+    if data.startswith("perm:") and PERM_ON:
+        return perm_callback(cq)
     action, tid = data.split(":", 1)
     with LOCK:
         state = load_state()
@@ -560,11 +1144,15 @@ def handle_callback(cq):
         except Exception as e:
             send(chat, f"❌ Couldn't create the ticket: {e}")
             return
-        api("editMessageText", chat_id=chat, message_id=mid, text=card_text(t) + f"\n\n✅ Accepted as {key}")
+        api("editMessageText", chat_id=chat, message_id=mid, text=card_text(t) + f"\n\n✅ Accepted as {key}",
+                reply_markup=doit_keyboard(key))
         if t["from_id"] not in ALLOWED:
             send(t["from_id"], f"✅ Your ticket was accepted as {key}: {t['fields']['title']}")
         with LOCK:
-            state = load_state(); state["pending"].pop(tid, None); save_state(state)
+            state = load_state(); state["pending"].pop(tid, None)
+            if t["from_id"] not in ALLOWED:  # remembered for /mytickets and member updates
+                state.setdefault("filed", {}).setdefault(str(t["from_id"]), []).append(key)
+            save_state(state)
     elif action == "rej":
         api("answerCallbackQuery", callback_query_id=cq["id"], text="Rejected")
         api("editMessageText", chat_id=chat, message_id=mid, text=card_text(t) + "\n\n❌ Rejected")
@@ -616,15 +1204,38 @@ def ticket_wait(state, user, now=None):
     return 0
 
 
+def ticket_projects(chat, getter):
+    """Project codes a ticket may use, or [] after telling the sender why not."""
+    try:
+        projects = getter()
+    except Exception as e:
+        print(f"ticket projects failed: {e}", file=sys.stderr, flush=True)
+        send(chat, "⚠️ Couldn't reach the ticket system. Try again in a minute.")
+        return []
+    if not projects:
+        send(chat, "No projects are mapped to this area yet. The owner sets AREA_<area>_PLANE_PROJECTS in nori.conf.")
+    return projects
+
+
 def new_ticket(msg, text):
     user = msg["from"]["id"]
+    chat = msg["chat"]["id"]
     with LOCK:
         state = load_state()
         person = state.get("people", {}).get(str(user))
+    garea = group_area(msg)
     if user in ALLOWED:
         projects, name = None, msg["from"].get("first_name", "you")
+        if garea:  # the owner in a bound group files for that group's area only
+            projects = ticket_projects(chat, lambda: area_projects(garea))
+            if not projects:
+                return
     elif person:
-        projects, name = person["projects"], person["name"]
+        if person.get("area") and msg["chat"].get("type") != "private" and garea != person["area"]:
+            return  # members use the bot in private or in their area's bound group (not the ops group: it may carry other chats)
+        projects, name = ticket_projects(chat, lambda: people_projects(person)), person["name"]
+        if not projects:
+            return
     else:
         return  # strangers: silently ignored
     if not text:
@@ -708,6 +1319,10 @@ def prsync():
                 plane("PATCH", f"/projects/{proj['id']}/work-items/{item['id']}/", {"state": done})
             plane("POST", f"/projects/{proj['id']}/work-items/{item['id']}/comments/",
                   {"comment_html": f"<p>✅ Merged: <a href=\"{pr['url']}\">{html.escape(pr['title'])}</a> ({html.escape(pr['headRefName'])} → {html.escape(pr['baseRefName'])}). Moved to Done automatically.</p>"})
+            try:
+                member_pr_note(key, pr)
+            except Exception as e:
+                print(f"member_pr_note failed: {e}", file=sys.stderr, flush=True)
             if ops_chat():
                 send(ops_chat(), f"✅ {key} merged → Done\n{repo.name}: PR #{pr['number']} {pr['headRefName']} → {pr['baseRefName']}\n{pr['url']}")
     sfile.write_text(json.dumps(sorted(seen)))
@@ -736,12 +1351,24 @@ def weekly():
 
 
 # ---------- /board and /peek: look at tickets without asking Claude ----------
-GROUP_ORDER = [("started", "Doing"), ("unstarted", "To do"), ("backlog", "Backlog")]
+GROUP_ORDER = [("started", "🔨 Doing"), ("unstarted", "📋 To do"), ("backlog", "🗂 Backlog")]
 PRIO = {"urgent": "urgent", "high": "high", "medium": "medium", "low": "low", "none": ""}
+PRIO_ICON = {"urgent": "🔴", "high": "🟠", "medium": "🟡", "low": "⚪"}
 # Plane project identifier -> area, from AREA_<area>_PLANE_PROJECTS="ID1,ID2" (unmapped: the first area)
 PLANE_AREA = {x.strip().upper(): a for a in AREAS for x in CONF.get(f"AREA_{a}_PLANE_PROJECTS", "").split(",") if x.strip()}
 PLANE_UI = f"http://{CONF.get('TAILNET_HOST', '')}/{CONF.get('PLANE_WORKSPACE', 'main')}"
 PEEK_EXAMPLE = f"{next(iter(PLANE_AREA), 'APP')}-1"
+
+
+def project_area(ident):
+    """The owner's view: a project without an AREA_<area>_PLANE_PROJECTS entry belongs to the first area."""
+    return PLANE_AREA.get(ident.upper(), AREAS[0])
+
+
+def member_projects(area, idents):
+    """Members' view: only projects explicitly mapped to the area. An unmapped project is never shown to members
+    (not even of the first area), so a project nobody assigned stays owner-only."""
+    return [i for i in idents if PLANE_AREA.get(i.upper()) == area]
 
 
 def _labels(i):
@@ -757,43 +1384,64 @@ def _short(text, n=60):
     return text if len(text) <= n else text[:n].rsplit(" ", 1)[0].rstrip(" ,:;-(") + "…"
 
 
-def board_text(only=None):
-    projects = plane("GET", "/projects/").get("results", [])
-    cat, title = projects, ""
+def board_lines(p, items, week_ago):
+    """(lines, done this week) for one project's board section; lines is [] when nothing is open."""
+    open_ = [i for i in items if i.get("state", {}).get("group") in dict(GROUP_ORDER)]
+    done7 = sum(1 for i in items if i.get("completed_at") and utc_ts(i["completed_at"]) >= week_ago)
+    if not open_:
+        return [], done7
+    out = [f"\n📁 {p['name']} ({p['identifier']}) · {len(open_)} open · ✅ {done7} this week"]
+    for grp, gtitle in GROUP_ORDER:
+        g = [i for i in open_ if i["state"]["group"] == grp]
+        if g:
+            out.append(f"  {gtitle}")
+            for i in g[:8]:
+                icons = PRIO_ICON.get(i.get("priority"), "") + INV_ICON.get(_inv(i), "")
+                out.append(f"    {p['identifier']}-{i['sequence_id']} " + (f"{icons} " if icons else "") + _short(i["name"]))
+            if len(g) > 8:
+                out.append(f"    +{len(g) - 8} more")
+    return out, done7
+
+
+def send_bg(chat, make, *args):
+    """Build a slow reply (Plane calls) off the poll loop, so other commands and taps keep working."""
+    def run():
+        try:
+            send(chat, make(*args))
+        except Exception as e:
+            send(chat, f"⚠️ {str(e)[:200]}")
+    threading.Thread(target=run, daemon=True).start()
+
+
+def board_text(only=None, allow=None):
+    """allow (members): a set of project identifiers; nothing outside it is ever fetched or shown."""
+    cat = plane("GET", "/projects/").get("results", [])
+    if allow is not None:
+        cat = [p for p in cat if p["identifier"].upper() in allow]
+    allp, title = cat, ""
     if only and only.lower() in AREAS:
-        area = only.lower()
-        cat = [p for p in projects if PLANE_AREA.get(p["identifier"].upper(), AREAS[0]) == area]
-        title = area
+        if allow is None:
+            cat = [p for p in cat if project_area(p["identifier"]) == only.lower()]
+        title = only.lower()
     elif only:
-        cat = [p for p in projects if p["identifier"].lower() == only.lower() or p["name"].lower().startswith(only.lower())]
+        cat = [p for p in cat if p["identifier"].lower() == only.lower() or p["name"].lower().startswith(only.lower())]
         if not cat:
-            return f"No project or area “{only}”. Try: " + ", ".join([*AREAS, *(p["identifier"] for p in projects)])
+            return f"No project or area “{only}”. Try: " + ", ".join(([] if allow is not None else list(AREAS)) + [p["identifier"] for p in allp])
         title = cat[0]["name"]
     week_ago = time.time() - 7 * 86400
-    out, empty = ["Board" + (f" · {title}" if title else "")], []
+    out, empty = ["🍙 Board" + (f" · {title}" if title else "")], []
     for p in cat:
-        items = plane_items(p["id"], "state,labels")
-        open_ = [i for i in items if i.get("state", {}).get("group") in dict(GROUP_ORDER)]
-        done7 = sum(1 for i in items if i.get("completed_at") and utc_ts(i["completed_at"]) >= week_ago)
-        time.sleep(1)  # Plane rate limit
-        if not open_:
-            empty.append(p["identifier"] + (f" ({done7} done this week)" if done7 else ""))
-            continue
-        out.append(f"\n{p['name']} ({p['identifier']}) · {len(open_)} open · {done7} done this week")
-        for grp, gtitle in GROUP_ORDER:
-            g = [i for i in open_ if i["state"]["group"] == grp]
-            if g:
-                out.append(f"  {gtitle}")
-                for i in g[:8]:
-                    tags = ", ".join(t for t in (_inv(i), PRIO.get(i.get("priority"), "")) if t)
-                    out.append(f"    {p['identifier']}-{i['sequence_id']} " + (f"[{tags}] " if tags else "") + _short(i["name"]))
-                if len(g) > 8:
-                    out.append(f"    +{len(g) - 8} more")
+        lines, done7 = board_lines(p, plane_items(p["id"], "state,labels"), week_ago)
+        time.sleep(0.2)  # gentle on Plane's rate limit (60/min); one call per project
+        if lines:
+            out += lines
+        else:
+            empty.append(p["identifier"] + (f" (✅ {done7})" if done7 else ""))
     if empty:
-        out.append("\nNothing open: " + ", ".join(empty))
+        out.append("\n✨ Nothing open: " + ", ".join(empty))
     if not cat:
         out.append("\nNo projects here")
-    out.append("\n/peek <ID> for details")
+    out.append("\n🔴🟠🟡⚪ priority · 🤖 auto · ⚡ quick-ask · 🧠 needs-me\n🔎 /peek <ID> for details")
     return "\n".join(out)
 
 
@@ -818,6 +1466,236 @@ def peek_text(key):
             lines.append(f"• {t[:300]}")
     lines.append(f"\n🔗 {PLANE_UI}/projects/{proj['id']}/issues/{item['id']}")
     return "\n".join(lines)
+
+
+# ---------- members: people added with `/allow <id> <name> <area>` follow their area's tickets ----------
+# A member sees only the projects explicitly mapped to their area (AREA_<area>_PLANE_PROJECTS). Unlike the owner's
+# /board, a project that is mapped to no area is NOT counted as the first area's for members: it stays owner-only.
+MEMBERS_FILE = HOME / ".ops-bot.members.json"  # cron's own file: last-seen ticket states + merged PRs to announce
+GROUP_ICON = {"started": "🔨", "unstarted": "📋", "backlog": "🗂", "completed": "✅", "cancelled": "🚫"}
+MEMBER_COMMANDS = [("ticket", "New ticket: /ticket what you need"), ("mytickets", "Tickets you filed and their status"),
+                   ("board", "Open tickets"), ("peek", f"One ticket: /peek {PEEK_EXAMPLE}"), ("help", "What I can do")]
+MEMBER_HELP = f"""/ticket <text>: new ticket, in your own words (the owner reviews it)
+/mytickets: tickets you filed and where they are
+/board: open tickets as a board
+/peek <ID>: one ticket up close, e.g. /peek {PEEK_EXAMPLE}"""
+
+
+def member_area(user):
+    with LOCK:
+        a = load_state().get("people", {}).get(str(user), {}).get("area")
+    return a if a in AREAS else None
+
+
+def area_projects(area):
+    return member_projects(area, [p["identifier"] for p in plane("GET", "/projects/").get("results", [])])
+
+
+def people_projects(person):
+    return area_projects(person["area"]) if person.get("area") else person["projects"]
+
+
+def member_menu(uid, on):
+    try:
+        scope = json.dumps({"type": "chat", "chat_id": uid})
+        if on:
+            api("setMyCommands", commands=json.dumps([{"command": c, "description": d} for c, d in MEMBER_COMMANDS]), scope=scope)
+        else:
+            api("deleteMyCommands", scope=scope)
+    except Exception as e:
+        print(f"member menu failed: {e}", file=sys.stderr, flush=True)
+
+
+def member_items(keys):
+    """{KEY: Plane work item with state} for ticket keys; keys it can't find are left out."""
+    want = {}
+    for k in keys:
+        ident, _, seq = k.partition("-")
+        if seq.isdigit():
+            want.setdefault(ident, set()).add(int(seq))
+    projs = {p["identifier"]: p["id"] for p in plane("GET", "/projects/").get("results", [])}
+    out = {}
+    for ident, seqs in want.items():
+        if ident not in projs:
+            continue
+        for i in plane_items(projs[ident], "state"):
+            if i.get("sequence_id") in seqs:
+                out[f"{ident}-{i['sequence_id']}"] = i
+        time.sleep(1)  # Plane rate limit
+    return out
+
+
+def mytickets_text(keys, items):
+    if not keys:
+        return "You haven't filed a ticket yet. Send /ticket and what you need."
+    lines = ["🎫 Your tickets"]
+    for k in reversed(keys[-20:]):
+        i = items.get(k)
+        st = (i or {}).get("state") or {}
+        lines.append(f"{GROUP_ICON.get(st.get('group'), '❔')} {k} · {st.get('name', '?')} · {_short(i.get('name', ''), 70)}" if i else f"❔ {k}")
+    return "\n".join(lines)
+
+
+def member_board(area, arg):
+    projs = [p for p in plane("GET", "/projects/").get("results", []) if member_projects(area, [p["identifier"]])]
+    hit = next((p for p in projs if arg and (p["identifier"].lower() == arg.lower() or p["name"].lower().startswith(arg.lower()))), None)
+    return board_text(hit["identifier"] if hit else area, allow={p["identifier"].upper() for p in projs})
+
+
+def member_peek(area, arg):
+    m = TICKET_RE.search(arg or "")
+    if not m:
+        return f"Usage: /peek {PEEK_EXAMPLE}"
+    key = f"{m.group(1).upper()}-{m.group(2)}"
+    if not member_projects(area, [m.group(1).upper()]):
+        return f"{key} isn't a {area} ticket"
+    return peek_text(key)
+
+
+def member_cmd(msg, area, cmd, args):
+    """A member's command (private chat or their area's bound group). Text from here never reaches a Claude session; no Do it button."""
+    chat, uid = msg["chat"]["id"], msg["from"]["id"]
+    try:
+        if cmd in ("/help", "/start"):
+            if cmd == "/start" and msg["chat"].get("type") == "private":
+                member_menu(uid, True)
+            send(chat, MEMBER_HELP)
+        elif cmd == "/mytickets":
+            with LOCK:
+                keys = load_state().get("filed", {}).get(str(uid), [])[-20:]
+            send(chat, mytickets_text(keys, member_items(keys) if keys else {}))
+        elif cmd == "/board":
+            send_bg(chat, member_board, area, args[0] if args else None)
+        elif cmd == "/peek":
+            send(chat, member_peek(area, " ".join(args)))
+        elif cmd[1:] in {c for c, _ in COMMANDS}:
+            send(chat, "That one is owner only 🙂 Try /help")
+    except Exception as e:
+        print(f"member cmd {cmd} failed: {e}", file=sys.stderr, flush=True)
+        send(chat, "⚠️ Couldn't reach the ticket board. Try again in a minute.")
+
+
+def group_area(msg):
+    """The area a group chat is bound to with /workgroup (None for private chats and unbound groups)."""
+    if msg["chat"].get("type") == "private":
+        return None
+    with LOCK:
+        return load_state().get("groups", {}).get(str(msg["chat"]["id"]))
+
+
+def workgroup_apply(state, chat, arg, ops, private):
+    """Bind or unbind a chat (state is changed in place) -> reply text. The caller has checked that the sender is the owner."""
+    if private:
+        return f"Send /workgroup {AREAS[0]} inside the group you want to bind."
+    if chat == ops:
+        return "This is the ops chat. Bind a separate group instead."
+    if arg != "off" and arg not in AREAS:
+        return f"Usage: /workgroup {AREA_CHOICES} (bind this group) or /workgroup off"
+    groups = state.setdefault("groups", {})
+    if arg == "off":
+        groups.pop(str(chat), None)
+        return "👍 Unbound."
+    groups[str(chat)] = arg
+    return (f"✅ Bound to {arg}: members and the owner can use /ticket /mytickets /board /peek here, and this group gets {arg} ticket updates. "
+            "Owner commands stay in your private chat.")
+
+
+def workgroup_cmd(msg, args):
+    """/workgroup <area>|off, owner only, inside the group to bind (never the ops chat)."""
+    chat = msg["chat"]["id"]
+    if msg.get("from", {}).get("id") not in ALLOWED:
+        return
+    with LOCK:
+        state = load_state()
+        reply = workgroup_apply(state, chat, args[0].lower() if args else "", ops_chat(), msg["chat"].get("type") == "private")
+        save_state(state)
+    send(chat, reply)
+
+
+def group_cmd(msg, garea, cmd, rest, args):
+    """A command in a bound group: member commands scoped to its area, for members of that area and the owner; the rest is ignored."""
+    user = msg["from"]["id"]
+    if user not in ALLOWED and member_area(user) != garea:
+        return
+    if cmd == "/ticket":
+        new_ticket(msg, rest.strip())
+    elif cmd in ("/mytickets", "/board", "/peek", "/help", "/start"):
+        member_cmd(msg, garea, cmd, args)
+    elif cmd[1:] in {c for c, _ in COMMANDS}:
+        send(msg["chat"]["id"], "Use this in your private chat with me.")
+
+
+def area_items(area):
+    """{KEY: work item with state} for every ticket of the area's (explicitly mapped) projects."""
+    out = {}
+    for p in plane("GET", "/projects/").get("results", []):
+        if not member_projects(area, [p["identifier"]]):
+            continue
+        for i in plane_items(p["id"], "state"):
+            out[f"{p['identifier']}-{i['sequence_id']}"] = i
+        time.sleep(1)  # Plane rate limit
+    return out
+
+
+def member_diff(keys, seen, items, first):
+    """-> (new seen {key: state group}, {key: message}) for state changes worth telling the member.
+    The first run only records the current states, so nobody gets a flood of old news."""
+    new, notes = dict(seen), {}
+    for k in keys:
+        i = items.get(k)
+        if not i:
+            continue
+        g = (i.get("state") or {}).get("group")
+        prev = g if first else seen.get(k, "unstarted")  # tickets start in To do when accepted
+        new[k] = g
+        t = _short(i.get("name", ""), 80)
+        line = {"started": f"🔨 {k} is now in progress: {t}", "completed": f"✅ {k} is done: {t}", "cancelled": f"🚫 {k} was cancelled"}.get(g)
+        if g != prev and line:
+            notes[k] = line
+    return new, notes
+
+
+def member_pr_note(key, pr):
+    """Called by prsync for each merged PR it links to a ticket; member_updates announces it to the filer."""
+    try:
+        d = json.loads(MEMBERS_FILE.read_text())
+    except (OSError, ValueError):
+        d = {}
+    d.setdefault("prs", []).append({"key": key, "title": pr["title"][:100], "url": pr["url"]})
+    MEMBERS_FILE.write_text(json.dumps(d))
+
+
+def member_updates():
+    """Called from cron: one DM per member with what changed on the tickets they filed, and one batched post per
+    bound group for all tickets of its area (the first run only records)."""
+    state = load_state()
+    members = {uid: state.get("filed", {}).get(uid, []) for uid, p in state.get("people", {}).items() if p.get("area")}
+    try:
+        d = json.loads(MEMBERS_FILE.read_text())
+    except (OSError, ValueError):
+        d = {}
+    allkeys = sorted({k for ks in members.values() for k in ks})
+    seen, notes = member_diff(allkeys, d.get("seen", {}), member_items(allkeys) if allkeys else {}, "seen" not in d)
+    for uid, ks in members.items():
+        lines = [notes[k] for k in ks if k in notes] + [f"🔀 PR merged for {p['key']}: {p['title']} {p['url']}" for p in d.get("prs", []) if p["key"] in ks]
+        if lines:
+            try:
+                send(int(uid), "\n".join(lines))
+            except Exception as e:
+                print(f"member update to {uid} failed: {e}", file=sys.stderr, flush=True)
+    gseen = d.get("gseen", {})
+    cache = {}
+    for chat, area in state.get("groups", {}).items():
+        items = cache[area] = cache.get(area) or area_items(area)
+        gseen[chat], gnotes = member_diff(sorted(items), gseen.get(chat, {}), items, chat not in gseen)
+        lines = list(gnotes.values()) + [f"🔀 PR merged for {p['key']}: {p['title']} {p['url']}" for p in d.get("prs", [])
+                                          if member_projects(area, [p["key"].split("-")[0]])]
+        if lines:
+            try:
+                send(int(chat), "\n".join(lines))
+            except Exception as e:
+                print(f"group update to {chat} failed: {e}", file=sys.stderr, flush=True)
+    MEMBERS_FILE.write_text(json.dumps({"seen": seen, "gseen": gseen, "prs": []}))
 
 
 # ---------- /ask: Claude answers questions about the server (read-only, no tools) ----------
@@ -882,22 +1760,320 @@ FACTS:
     send(chat, answer)
 
 
+# ---------- ask-owner: tap-to-answer buttons for questions from the Claude sessions ----------
+# A session runs `ask-owner` (writes {id, area, question, options, created} to ~/.ask-owner/outbox/ as the area user);
+# we post it with one button per option and type the tapped answer back into that session.
+ASK_TTL = 86400
+ASK_EVERY = 15      # s between outbox polls (each poll is a few sudo calls per area, so don't go faster)
+ASK_MARK = "[Owner tapped on Telegram]"
+
+
+def ask_clean(s, n):
+    """One line, no control characters, capped: the only text that ever reaches send-keys."""
+    s = re.sub(r"[\x00-\x1f\x7f-\x9f  ]+", " ", str(s))
+    return re.sub(r" +", " ", s).strip()[:n]
+
+
+def ask_keyboard(rid, options):
+    return json.dumps({"inline_keyboard": [[{"text": o[:40], "callback_data": f"ask:{rid}:{i}"}] for i, o in enumerate(options)]})
+
+
+def area_icon(area):
+    return AREA_ICONS[AREAS.index(area) % len(AREA_ICONS)] if area in AREAS else "🤖"
+
+
+def ask_post(area, req):
+    """Send one outbox request to the ops chat; remember it in state (not the file) for the tap."""
+    q = ask_clean(req.get("question", ""), 300)
+    opts = [ask_clean(o, 60) for o in req["options"]][:6] if isinstance(req.get("options"), list) else []
+    chat = ops_chat()
+    if not q or len(opts) < 2 or not all(opts) or not chat:
+        return False
+    rid = os.urandom(5).hex()
+    r = api("sendMessage", chat_id=chat, text=f"{area_icon(area)} {area} asks:\n{q}", reply_markup=ask_keyboard(rid, opts))
+    with LOCK:
+        state = load_state()
+        state.setdefault("asks", {})[rid] = {"area": area, "q": q, "opts": opts, "chat": chat,
+                                             "mid": r["result"]["message_id"], "at": int(time.time())}
+        save_state(state)
+    return True
+
+
+def ask_poll():
+    """Pick up new requests from each area's outbox (read as the area user), then expire old asks."""
+    for area in AREAS:
+        box = area_home(area) / ".ask-owner"
+        rc, out = as_user(area, "find", f"{box}/outbox", "-maxdepth", "1", "-name", "*.json")
+        for path in (out.splitlines() if rc == 0 else [])[:10]:
+            rc, body = as_user(area, "cat", path)
+            try:
+                ok = rc == 0 and ask_post(area, json.loads(body))
+            except (ValueError, TypeError, AttributeError):
+                ok = False  # junk file: park it, don't loop on it
+            except Exception as e:
+                print(f"ask post failed: {e}", file=sys.stderr, flush=True)
+                continue  # retry next tick
+            as_user(area, "mkdir", "-p", f"{box}/sent")
+            as_user(area, "mv", path, f"{box}/sent/" + ("" if ok else "bad-") + os.path.basename(path))
+    with LOCK:
+        state = load_state()
+        old = {k: v for k, v in state.get("asks", {}).items() if time.time() - v["at"] > ASK_TTL}
+        for k in old:
+            state["asks"].pop(k)
+        if old:
+            save_state(state)
+    for v in old.values():
+        try:
+            api("editMessageText", chat_id=v["chat"], message_id=v["mid"], text=f"{v['q']}\n\n⌛ expired (no answer in 24h)")
+        except Exception:
+            pass
+
+
+def ask_loop():
+    while True:
+        try:
+            ask_poll()
+        except Exception as e:
+            print(f"ask_poll error: {e}", file=sys.stderr, flush=True)
+        time.sleep(ASK_EVERY)
+
+
+BOX_RULE = re.compile(r"^\s*[╭╰]?[─━]{3,}")
+BOX_PROMPT = re.compile(r"^\s*│?\s*[❯>]\s?(.*?)\s*│?\s*$")
+DIALOG_WORDS = re.compile(r"Enter to (confirm|select)|Esc to cancel|↑/↓|to navigate|\(y/n\)|Press Enter|^\s*[❯>]?\s*\d+\.\s", re.I | re.M)
+
+
+def input_box_idle(screen):
+    """True only when the screen's bottom-most thing is Claude Code's normal, EMPTY input box:
+    rule, one prompt line ('❯' or '>' with nothing typed, or the dim 'Try "..."' hint), rule, then at most a few
+    footer lines. Any menu, dialog, selector or multi-line draft fails this (positive check, not a blacklist)."""
+    lines = [l.rstrip() for l in screen.splitlines() if l.strip()]
+    for i in range(len(lines) - 1, 0, -1):
+        mm = BOX_PROMPT.match(lines[i])
+        if not mm:
+            continue
+        text = mm.group(1)
+        below = lines[i + 1:]
+        if text and not text.startswith('Try "'):
+            return False
+        if not BOX_RULE.match(lines[i - 1]) or not below or not BOX_RULE.match(below[0]) or len(below) > 16:  # footer grows a line per background agent
+            return False
+        return not DIALOG_WORDS.search("\n".join(below[1:]))
+    return False
+
+
+def typing_blocker(area):
+    """None when it is safe to type text + Enter into the area's main session, else a short reason for the owner."""
+    st = session_state(area)[0]
+    if st == "down":
+        return "down"
+    if st == "permission":
+        return "waiting for your 🔐 approval (tap it in the bot DM first)"
+    rc, out = as_user(area, "tmux", "-L", f"claude-{area}", "capture-pane", "-p", "-t", f"claude-{area}")
+    if rc != 0:
+        return "down"
+    if not input_box_idle(out):
+        return "busy: showing a dialog, menu or unsent draft (answer it in attach first)"
+    return None
+
+
+def ask_type(area, text):
+    """Type text + Enter into the area's main session (same send-keys steps as nightly-handoff)."""
+    t = f"claude-{area}"
+    for keys in (["C-u"], ["-l", text], ["Enter"]):
+        if as_user(area, "tmux", "-L", t, "send-keys", "-t", t, *keys)[0] != 0:
+            return False
+    return True
+
+
+def busy_alert(cid, area, why):
+    api("answerCallbackQuery", callback_query_id=cid, show_alert="true", text=f"{area} is {why}. Tap again after.")
+
+
+def ask_callback(cq):
+    """ask:<id>:<index>; the typed text comes only from the stored ask plus this index."""
+    cid = cq["id"]
+    m = re.fullmatch(r"ask:([0-9a-f]{10}):(\d)", cq.get("data", ""))
+    with LOCK:
+        a = load_state().get("asks", {}).get(m.group(1)) if m else None
+    if not a or int(m.group(2)) >= len(a["opts"]):
+        api("answerCallbackQuery", callback_query_id=cid, text="Already answered or expired.")
+        return
+    opt = a["opts"][int(m.group(2))]
+    # Enter into any dialog would confirm the highlighted option; a draft would be merged. Nothing is claimed yet, so a later tap works.
+    why = typing_blocker(a["area"])
+    if why:
+        busy_alert(cid, a["area"], why)
+        return
+    with LOCK:  # claim it so a double tap can't type twice
+        state = load_state()
+        if not state.get("asks", {}).pop(m.group(1), None):
+            api("answerCallbackQuery", callback_query_id=cid, text="Already answered.")
+            return
+        save_state(state)
+    if not ask_type(a["area"], f"{ASK_MARK} Q: {a['q']} → {opt}"):
+        api("answerCallbackQuery", callback_query_id=cid, show_alert="true", text="Couldn't type into the session.")
+        with LOCK:
+            state = load_state(); state.setdefault("asks", {})[m.group(1)] = a; save_state(state)
+        return
+    api("answerCallbackQuery", callback_query_id=cid, text=f"Sent: {opt[:150]}")
+    api("editMessageText", chat_id=a["chat"], message_id=a["mid"], text=f"{a['q']}\n\n👉 {opt}")
+
+
+# ---------- "▶️ Do it" button on tickets: types "Work on <ID>" into that project's area session ----------
+DOIT_KEY = re.compile(r"[A-Z][A-Z0-9]{1,9}-\d{1,6}")
+DOIT_MARK = "[Owner tapped ▶️ Do it on Telegram]"
+
+
+def doit_keyboard(key):
+    return json.dumps({"inline_keyboard": [[{"text": "▶️ Do it", "callback_data": f"do:{key}"}]]})
+
+
+def doit_callback(cq):
+    """do:<PROJECT>-<seq> (owner only: handle_callback checked); the typed text is a fixed sentence plus the Plane title as quoted data."""
+    cid = cq["id"]
+    m = re.fullmatch(r"do:(" + DOIT_KEY.pattern + ")", cq.get("data", ""))
+    msg = cq.get("message") or {}
+    if not m or not msg:
+        api("answerCallbackQuery", callback_query_id=cid, text="Bad button.")
+        return
+    key = m.group(1)
+    ident, seq = key.split("-")
+    area = project_area(ident)
+    why = typing_blocker(area)
+    if why:
+        busy_alert(cid, area, why)
+        return
+    st = session_state(area)[0]
+    try:
+        _, item = find_item(ident, seq)
+    except Exception as e:
+        api("answerCallbackQuery", callback_query_id=cid, show_alert="true", text=f"Couldn't read {key} in Plane: {str(e)[:100]}")
+        return
+    if not item:
+        api("answerCallbackQuery", callback_query_id=cid, text=f"{key} not found.")
+        return
+    with LOCK:  # claim it so a double tap can't type twice
+        state = load_state()
+        doit = state.setdefault("doit", {})
+        if time.time() - doit.get(key, 0) < 120:
+            api("answerCallbackQuery", callback_query_id=cid, text="Already sent.")
+            return
+        doit[key] = time.time()
+        save_state(state)
+    title = ask_clean(item.get("name", ""), 120).replace('"', "'")
+    text = ask_clean(f'{DOIT_MARK} Work on {key} ("{title}"). Read the ticket (description + comments) first, '
+                     "follow the usual ticket flow, and reply in the chat as usual.", 500)
+    if not ask_type(area, text):
+        api("answerCallbackQuery", callback_query_id=cid, show_alert="true", text="Couldn't type into the session.")
+        with LOCK:
+            state = load_state(); state.get("doit", {}).pop(key, None); save_state(state)
+        return
+    api("answerCallbackQuery", callback_query_id=cid, **({"show_alert": "true", "text": f"queued: {area} is busy"} if st == "working" else {"text": f"Sent to {area}"}))
+    api("editMessageText", chat_id=msg["chat"]["id"], message_id=msg["message_id"],
+        text=(msg.get("text") or key)[:3800] + f"\n\n▶️ sent to {area}")
+
+
+# ---------- /recall: search past chats, tickets and handoff notes ----------
+def recall_prefixes():
+    """{prefix: area}: each area's name, plus its first letter when no other area starts with the same one."""
+    out = {a: a for a in AREAS}
+    for a in AREAS:
+        if sum(1 for b in AREAS if b[0] == a[0]) == 1:
+            out.setdefault(a[0], a)
+    return out
+
+
+def recall_parse(text):
+    """'w: deploy' / 'work: deploy' / 'deploy' -> (area or None, query)."""
+    m = re.match(r"\s*([A-Za-z0-9_-]+)\s*[:：]\s*(.*)", text, re.S)
+    area = recall_prefixes().get(m.group(1).lower()) if m else None
+    return (area, m.group(2).strip()) if area else (None, text.strip())
+
+
+def recall_cmd(chat, text):
+    area, query = recall_parse(text)
+    if not query:
+        ex = AREAS[0]
+        send(chat, f"Usage: /recall some words  or  /recall {ex}: some words  (area: {', '.join(recall_prefixes())})")
+        return
+    exe = HOME / ".local/bin/recall"
+    rc, out = sh(str(exe) if exe.exists() else "recall", query, *(["--area", area] if area else []), timeout=60)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    if len(out) > 3500:
+        out = out[:3500].rsplit("\n", 1)[0] + "\n…(trimmed; narrow the words or add an area prefix)"
+    send(chat, out or "(nothing found)")
+
+
+# ---------- /usage ----------
+def usage_text():
+    """Plan-limit % (freshest usage-snapshot of any area) + token totals per area (usage-report), run as each area
+    user from its own home (the admin can't read it)."""
+    now = time.time()
+    snaps = []
+    for area in AREAS:
+        rc, out = as_user(area, "cat", str(area_home(area) / ".claude/usage-snapshot.json"))
+        try:
+            if rc == 0:
+                snaps.append(json.loads(out))
+        except ValueError:
+            pass
+    lines = ["📊 Usage"]
+    if snaps:
+        s = max(snaps, key=lambda x: x.get("ts", 0))
+        parts = []
+        for label, key, fmt in (("5h", "five_hour", "%H:%M"), ("week", "seven_day", "%a %H:%M")):
+            w = s.get(key) or {}
+            if w.get("used_percentage") is None:
+                continue
+            if (w.get("resets_at") or now + 1) < now:
+                parts.append(f"{label} reset since")
+            else:
+                at = f" (resets {datetime.datetime.fromtimestamp(w['resets_at'], TZ).strftime(fmt)})" if w.get("resets_at") else ""
+                parts.append(f"{label} {w['used_percentage']:.0f}%{at}")
+        age = int((now - s.get("ts", now)) / 60)
+        lines.append(f"Limits: {' · '.join(parts)} · {age}m ago" if parts else "Limits: no data yet")
+    else:
+        lines.append("Limits: no snapshot yet (needs an interactive session's first reply); tokens only")
+    fmt_tok = lambda n: f"{n / 1e6:.1f}M" if n >= 1e5 else f"{n / 1e3:.0f}k"
+    for area in AREAS:
+        rc, out = as_user(area, str(area_home(area) / ".local/bin/usage-report"), timeout=60)
+        try:
+            d = json.loads(out)
+            tot = lambda b: {m: sum(v.values()) for m, v in d[b].items()}
+            today, week = tot("today"), tot("week")
+        except (ValueError, KeyError, AttributeError, TypeError):
+            lines.append(f"{area}: ❌ report failed")
+            continue
+        t = sum(today.values())
+        top = ""
+        if t:
+            m, n = max(today.items(), key=lambda x: x[1])
+            top = f" ({m.replace('claude-', '')} {n * 100 // t}%)"
+        lines.append(f"{area}: today {fmt_tok(t)}{top} · 7d {fmt_tok(sum(week.values()))}")
+    return "\n".join(lines)
+
+
 # ---------- commands ----------
 HELP = "\n".join(([
     "/ask <question>: ask Claude about the server (read-only, it can't change anything)",
 ] if ASK_ON else []) + ([
+    "/recall [<area>:] <words>: search past chats, tickets and handoff notes, e.g. /recall some words",
+] if RECALL_ON else []) + ([
     f"/board [{AREA_CHOICES}|project]: open tickets as a board (🔨 doing · 📋 to do · 🗂 backlog)",
     f"/peek <ID>: one ticket up close, e.g. /peek {PEEK_EXAMPLE}",
 ] if PLANE_ON else []) + [
     "/apply: re-run setup.sh from ~/nori (sync the repo from your laptop first)",
     "/progress: what each Claude is doing right now (working / waiting for your 🔐 / idle)",
     "/status: server health",
+    "/usage: plan limit % and tokens used per area",
     f"/restart {AREA_CHOICES}: restart that Claude session (it forgets its chat)",
     "/here: send alerts and the digest to this chat",
     "/whoami: show your Telegram id",
 ] + ([
     "/ticket <text>: new ticket (Claude fills project/labels; you accept/reject)",
-    "/allow <user id> <name> <PROJECTS>: let someone send /ticket, e.g. /allow 123 Alice APP",
+    f"/allow <user id> <name> <PROJECTS|{AREA_CHOICES}>: let someone send /ticket, e.g. /allow 123 Alice APP; an area name makes them a member (/ticket /mytickets /board /peek)",
+    f"/workgroup {AREA_CHOICES}|off: (inside a group) bind it to an area for members + you",
     "/revoke <name or id>   /people: who can send tickets",
 ] if PLANE_ON else []))
 
@@ -923,6 +2099,16 @@ def apply_config(chat):
         send(chat, f"{'✅' if rc == 0 else '❌'} setup.sh\n{tail}\n\nIf rules/settings changed: /restart <area>")
     finally:
         APPLY_LOCK.release()
+
+
+def react(chat, mid, emoji="👀"):
+    """Best effort: a reaction on the command so the sender sees it arrived before a slow reply."""
+    if not mid:
+        return
+    try:
+        api("setMessageReaction", chat_id=chat, message_id=mid, reaction=json.dumps([{"type": "emoji", "emoji": emoji}]))
+    except Exception:
+        pass
 
 
 def handle(msg):
@@ -953,13 +2139,26 @@ def handle(msg):
     cmd, _, rest = text.partition(" ")
     args = rest.split()
     cmd = cmd.split("@", 1)[0].lower()
+    if user in ALLOWED or (PLANE_ON and member_area(user)):
+        react(chat, msg.get("message_id"))  # 👀 = got it, like the chat bots
     if cmd == "/whoami":
         send(chat, f"Your Telegram user id: {user}\nThis chat id: {chat}")
+        return
+    if cmd == "/workgroup" and PLANE_ON:
+        workgroup_cmd(msg, args)
+        return
+    garea = group_area(msg) if PLANE_ON else None
+    if garea:  # bound group: member commands for its area only
+        group_cmd(msg, garea, cmd, rest, args)
         return
     if cmd == "/ticket" and PLANE_ON:
         new_ticket(msg, rest.strip())
         return
     if user not in ALLOWED:
+        area = member_area(user) if PLANE_ON else None
+        if area and msg["chat"].get("type") == "private":
+            member_cmd(msg, area, cmd, args)
+            return
         if cmd == "/start" and PLANE_ON:
             with LOCK:
                 known = str(user) in load_state().get("people", {})
@@ -972,15 +2171,24 @@ def handle(msg):
         send(chat, status_text())
     elif cmd == "/progress":
         send(chat, progress_text())
+    elif cmd == "/usage":
+        threading.Thread(target=lambda: send(chat, usage_text()), daemon=True).start()
+    elif cmd == "/recall" and RECALL_ON:
+        threading.Thread(target=recall_cmd, args=(chat, rest), daemon=True).start()
     elif cmd == "/ask" and ASK_ON:
         if not rest.strip():
             send(chat, "Usage: /ask is the server healthy?")
         else:
             threading.Thread(target=ask, args=(chat, rest.strip()), daemon=True).start()
     elif cmd == "/board" and PLANE_ON:
-        send(chat, board_text(args[0] if args else None))
+        send_bg(chat, board_text, args[0] if args else None)
     elif cmd == "/peek" and PLANE_ON:
-        send(chat, peek_text(" ".join(args)))
+        txt = peek_text(" ".join(args))
+        k = DOIT_KEY.search(txt.split("\n", 1)[0]) if txt.startswith("🔎 ") else None
+        if k:
+            api("sendMessage", chat_id=chat, text=txt[:3900], disable_web_page_preview="true", reply_markup=doit_keyboard(k.group(0)))
+        else:
+            send(chat, txt)
     elif cmd == "/restart":
         name = args[0].lower() if args else ""
         if name not in INSTANCES:
@@ -995,7 +2203,17 @@ def handle(msg):
         send(chat, "👍 Alerts and the daily digest will be sent to this chat.")
     elif cmd == "/allow" and PLANE_ON:
         if len(args) < 3 or not args[0].isdigit():
-            send(chat, "Usage: /allow <user id> <name> <PROJECTS>\nExample: /allow 123456 Alice APP,WEB\n(they get their id by sending /whoami to me)")
+            send(chat, f"Usage: /allow <user id> <name> <PROJECTS|{AREA_CHOICES}>\nExample: /allow 123456 Alice {PEEK_EXAMPLE.split('-')[0]}  or  /allow 123456 Alice {AREAS[0]}\n(they get their id by sending /whoami to me)")
+            return
+        if args[2].lower() in AREAS:  # an area name: member of every project mapped to that area
+            area = args[2].lower()
+            with LOCK:
+                state = load_state()
+                state.setdefault("people", {})[args[0]] = {"name": args[1], "area": area}
+                save_state(state)
+            member_menu(int(args[0]), True)
+            warn = "" if area in PLANE_AREA.values() else f"\n⚠️ No Plane project is mapped to {area} yet (AREA_{area}_PLANE_PROJECTS in nori.conf), so they see nothing for now."
+            send(chat, f"✅ {args[1]} is now a {area} member: /ticket, /mytickets, /board, /peek for {area} projects (private chat or a /workgroup). Tell them to open me and send /start." + warn)
             return
         projects = [x.strip().upper() for x in args[2].split(",") if x.strip()]
         try:
@@ -1019,24 +2237,31 @@ def handle(msg):
             people = state.get("people", {})
             hit = [uid for uid, p in people.items() if uid == key or p["name"].lower() == key.lower()]
             for uid in hit:
-                people.pop(uid)
+                if people.pop(uid).get("area"):
+                    member_menu(int(uid), False)
             save_state(state)
         send(chat, f"Removed: {', '.join(hit) or 'nobody matched'}")
     elif cmd == "/people" and PLANE_ON:
         with LOCK:
-            people = load_state().get("people", {})
-        send(chat, "\n".join(f"• {p['name']} ({uid}): {', '.join(p['projects'])}" for uid, p in people.items()) or "Nobody yet. Use /allow.")
+            state = load_state()
+        people = state.get("people", {})
+        rows = [f"• {p['name']} ({uid}): " + (f"{p['area']} member" if p.get("area") else ", ".join(p["projects"])) for uid, p in people.items()]
+        rows += [f"• group {gid}: {area}" for gid, area in state.get("groups", {}).items()]
+        send(chat, "\n".join(rows) or "Nobody yet. Use /allow.")
 
 
-COMMANDS = [("apply", "Re-run setup.sh from ~/nori"), ("progress", "What each Claude is doing now"), ("help", "What I can do"),
+COMMANDS = [("apply", "Re-run setup.sh from ~/nori"), ("usage", "Plan limit % and tokens per area"), ("progress", "What each Claude is doing now"), ("help", "What I can do"),
             ("status", "Server health"), ("restart", f"Restart a Claude session: /restart {AREA_CHOICES}"),
             ("here", "Send alerts and the digest to this chat"), ("whoami", "Show your Telegram id")]
 if ASK_ON:
     COMMANDS.insert(0, ("ask", "Ask Claude about the server"))
+if RECALL_ON:
+    COMMANDS.append(("recall", f"Search past chats: /recall [{AREAS[0]}:] words"))
 if PLANE_ON:
     COMMANDS += [("board", f"Open tickets as a board: /board [{AREA_CHOICES}|project]"), ("peek", f"One ticket: /peek {PEEK_EXAMPLE}"),
                  ("ticket", "New ticket: /ticket what you need"), ("people", "Who can send tickets"),
-                 ("allow", "Let someone send tickets: /allow id name PROJ"), ("revoke", "Remove someone: /revoke name")]
+                 ("allow", "Let someone send tickets: /allow id name PROJ"), ("revoke", "Remove someone: /revoke name"),
+                 ("workgroup", f"In a group: bind it to an area ({AREA_CHOICES}|off)")]
 
 
 def serve():
@@ -1044,6 +2269,9 @@ def serve():
         api("setMyCommands", commands=json.dumps([{"command": c, "description": d} for c, d in COMMANDS]))
     except Exception as e:
         print(f"setMyCommands failed: {e}", file=sys.stderr, flush=True)
+    threading.Thread(target=ask_loop, daemon=True).start()
+    if PERM_ON:
+        threading.Thread(target=permwatch_loop, daemon=True).start()
     offset = None
     while True:
         try:

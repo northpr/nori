@@ -4,6 +4,7 @@ After=network-online.target
 ConditionPathExists=%h/.ops-bot.env
 
 [Service]
+EnvironmentFile=-%h/.config/nori/claude.env
 ExecStart=/usr/bin/python3 -I %h/.local/bin/ops-bot serve
 Restart=always
 RestartSec=10

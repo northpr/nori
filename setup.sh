@@ -10,6 +10,8 @@
 # Users: the admin (sudo) runs the Ops bot, cron and this script. Each area user (no sudo, home not
 # readable by the others) runs one Claude session. The admin publishes a read-only copy of this repo to
 # /opt/nori; setup-user.sh (run as each area user) links from there. Secrets never live in the repo.
+# sudo is only used as `sudo -u <area>` and `sudo nori-root <subcommand>` (the root helper bootstrap.sh
+# installs; with ADMIN_SUDO=limited nothing else runs as root without a password). tests/ check this.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
@@ -18,7 +20,7 @@ case "${1:-}" in
   ""|apply) ;;
   --check|--restart) MODE="$1" ;;
   --render-only) MODE=render; RENDER_DIR="${2:?usage: setup.sh --render-only <dir>}" ;;
-  -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
   *) echo "unknown option: $1 (see ./setup.sh --help)" >&2; exit 2 ;;
 esac
 
@@ -44,6 +46,15 @@ S="$REPO/server"
 OPT=/opt/nori
 UNITS="$HOME/.config/systemd/user"
 
+# --- the root helper must match this repo (bootstrap.sh installs it as a root-owned copy) ---
+want=$(sed -n 's/^NORI_ROOT_VERSION=//p' "$S/sbin/nori-root")
+have=$(sudo -n nori-root version 2>/dev/null || true)
+if [[ $have != "$want" ]]; then
+  echo "setup.sh: the root helper /usr/local/sbin/nori-root is ${have:+outdated (version $have, this repo needs $want)}${have:-missing or not allowed by sudo}." >&2
+  echo "Re-run bootstrap once (it asks for your password with ADMIN_SUDO=limited):  sudo bash ~/nori/bootstrap.sh" >&2
+  exit 2
+fi
+
 # --- learn the Tailscale name once it exists (used for preview and Plane links) ---
 if [[ -z $TAILNET_HOST ]] && command -v tailscale >/dev/null 2>&1; then
   th=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//') || th=""
@@ -57,19 +68,14 @@ fi
 
 mkdir -p "$HOME/logs" "$HOME/.local/bin"
 python3 "$REPO/scripts/render.py" "$REPO" "$G"
-chmod +x "$REPO"/setup*.sh "$REPO"/bootstrap.sh "$S"/bin/* "$S/git/pre-commit" "$REPO/scripts/render.py"
+chmod +x "$REPO"/setup*.sh "$REPO"/bootstrap.sh "$S"/bin/* "$S"/sbin/* "$S/git/pre-commit" "$REPO/scripts/render.py"
 
 # --- read-only shared copy for the area users ---
-# Not shared: the admin's local/ (private rules, notes), except local/skills (linked by setup-user.sh; local rules are
-# already rendered into generated/), plus .git, progress notes and *.env. nori.conf and profile/ stay: setup-user.sh reads them.
-SHARE_FILTER=(--exclude .git --exclude SETUP-PROGRESS.md --exclude '*.env'
-              --include /local/skills/ --include '/local/skills/**' --exclude '/local/*')
+# What stays out (.git, *.env, progress notes, the admin's local/ except local/skills) is decided in server/sbin/nori-root.
 if [[ $MODE == --check ]]; then
-  [[ -z "$(sudo rsync -rcni --delete --delete-excluded "${SHARE_FILTER[@]}" "$REPO/" "$OPT/" 2>/dev/null)" ]] || { drift=1; note "drift: $OPT out of date"; }
+  sudo -n nori-root sync-opt --check "$REPO" >/dev/null || { drift=1; note "drift: $OPT out of date"; }
 else
-  sudo mkdir -p "$OPT"
-  sudo rsync -a --delete --delete-excluded "${SHARE_FILTER[@]}" "$REPO/" "$OPT/"
-  sudo chown -R root:root "$OPT" && sudo chmod -R a+rX,go-w "$OPT"
+  sudo -n nori-root sync-opt "$REPO"
 fi
 
 # --- admin: scripts + git identity (the admin also pushes backups) ---
@@ -90,7 +96,7 @@ for b in attach recall; do
   nori_bin_wanted "$b" || continue
   if [[ "$(readlink -f /usr/local/bin/$b 2>/dev/null)" != "$OPT/server/bin/$b" ]]; then
     drift=1
-    if [[ $MODE == --check ]]; then note "drift: /usr/local/bin/$b"; else sudo ln -sfn "$OPT/server/bin/$b" "/usr/local/bin/$b"; note "linked: /usr/local/bin/$b"; fi
+    if [[ $MODE == --check ]]; then note "drift: /usr/local/bin/$b"; else sudo -n nori-root link-bin "$b"; note "linked: /usr/local/bin/$b"; fi
   fi
 done
 
@@ -110,6 +116,59 @@ elif [[ $MODE != --check ]] && systemctl --user is-enabled --quiet ops-bot 2>/de
   systemctl --user disable --now ops-bot >/dev/null 2>&1; note "stopped ops-bot (OPS_BOT=false)"
 fi
 
+# --- Claude Code version: every user runs the wanted one (server/claude-code.version, or CLAUDE_CODE_VERSION) ---
+# Self-updates are off (settings partials + bootstrap's managed settings), so this is where upgrades and rollbacks happen.
+# An exact version is installed where it differs; stable/latest is (re)installed on every apply, never on --check.
+merge_json "$G/claude/settings.admin.partial.json" "$HOME/.claude/settings.json"
+CC_WANT=$(nori_claude_version)
+for u in "$ADMIN_USER" $AREAS; do
+  id "$u" >/dev/null 2>&1 || continue
+  if [[ $u == "$ADMIN_USER" ]]; then as_u=(env); else as_u=(sudo -n -u "$u" -H); fi
+  cc="$(getent passwd "$u" | cut -d: -f6)/.local/bin/claude"
+  have=$(cd / && "${as_u[@]}" "$cc" --version 2>/dev/null | awk '{print $1}') || have=""
+  if [[ -z $have ]]; then
+    drift=1; note "Claude Code not found for $u ($cc): run bootstrap.sh as root"; continue
+  fi
+  plan=$(nori_claude_plan "$have" "$CC_WANT")
+  if [[ $plan == keep-newer ]]; then
+    note "Claude Code for $u is $have, newer than the tested $CC_WANT: kept (setup.sh never downgrades on its own)."
+    note "  Keep it: CLAUDE_CODE_VERSION=$have in nori.conf. Go back: CLAUDE_CODE_VERSION=$CC_WANT, then ./setup.sh"
+    continue
+  fi
+  if [[ $CC_WANT =~ ^[0-9] ]]; then
+    [[ $plan == ok ]] && continue
+    drift=1
+    if [[ $MODE == --check ]]; then note "drift: Claude Code for $u is $have, wanted $CC_WANT${plan/#downgrade/ (a downgrade, set in nori.conf)}"; continue; fi
+    [[ $plan == downgrade ]] && note "Claude Code for $u: downgrading $have -> $CC_WANT (CLAUDE_CODE_VERSION in nori.conf)"
+  elif [[ $MODE == --check ]]; then
+    note "Claude Code for $u: $have (CLAUDE_CODE_VERSION=$CC_WANT, not pinned)"; continue
+  fi
+  if out=$(cd / && "${as_u[@]}" "$cc" install "$CC_WANT" 2>&1); then
+    now=$(cd / && "${as_u[@]}" "$cc" --version 2>/dev/null | awk '{print $1}') || now=""
+    [[ $now != "$have" ]] && { note "Claude Code for $u: $have -> $now"; CC_CHANGED=1; }
+  else
+    note "warning: 'claude install $CC_WANT' failed for $u: $(tail -n 3 <<<"$out")"
+  fi
+done
+if [[ ${CC_CHANGED:-} == 1 ]]; then
+  # the Ops bot re-reads versions on its next check; keep its "already alerted" memory so no old alert repeats
+  python3 -I - "$HOME/.ops-bot.claude-version.json" <<'PY' || true
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except (OSError, ValueError):
+    sys.exit(0)
+for k in ("ts", "versions", "wanted"):
+    d.pop(k, None)
+json.dump(d, open(p, "w"))
+PY
+  [[ $MODE == --restart ]] || note "Claude Code changed: run ./setup.sh --restart so the sessions use it"
+fi
+if ! cmp -s "$S/claude/managed-settings.json" /etc/claude-code/managed-settings.d/50-nori.json 2>/dev/null; then
+  drift=1; note "drift: /etc/claude-code/managed-settings.d/50-nori.json is missing or old: run 'sudo bash bootstrap.sh' as root"
+fi
+
 # --- area users ---
 GROUP_ID=$(jq -r '.chat_id // empty' "$HOME/.ops-bot.state.json" 2>/dev/null || true)
 for a in $AREAS; do
@@ -117,29 +176,46 @@ for a in $AREAS; do
     drift=1; note "area user '$a' does not exist: run bootstrap.sh as root first"; continue
   fi
   h=$(area_home "$a")
-  if is_on PLANE && [[ -f $HOME/.plane-mcp.env ]] && ! sudo cmp -s "$HOME/.plane-mcp.env" "$h/.plane-mcp.env"; then
+  # the Plane token: compared and written by the area user itself (fed on stdin), no root needed
+  if is_on PLANE && [[ -f $HOME/.plane-mcp.env ]] && ! sudo -n -u "$a" cmp -s - "$h/.plane-mcp.env" < "$HOME/.plane-mcp.env"; then
     drift=1
     if [[ $MODE == --check ]]; then note "drift: $h/.plane-mcp.env"; else
-      sudo install -o "$a" -g "$a" -m 600 "$HOME/.plane-mcp.env" "$h/.plane-mcp.env"; note "copied the Plane token to $a"
+      sudo -n -u "$a" sh -c 'umask 077 && cat > "$1.tmp" && mv -f "$1.tmp" "$1"' sh "$h/.plane-mcp.env" < "$HOME/.plane-mcp.env"
+      note "copied the Plane token to $a"
     fi
   fi
   (cd / && sudo -n -u "$a" -H "$OPT/setup-user.sh" "$a" "$MODE" "$GROUP_ID") || drift=1
 done
 
-# --- Docker waits for Tailscale at boot, so Plane can bind to the tailnet IP (root-owned: installed as a copy) ---
+# --- Docker waits for Tailscale at boot, so Plane can bind to the tailnet IP (the content lives in nori-root) ---
 if is_on PLANE; then
   dropin=/etc/systemd/system/docker.service.d/10-after-tailscale.conf
-  if ! cmp -s "$S/systemd/docker-after-tailscale.conf" "$dropin" 2>/dev/null; then
+  if ! sudo -n nori-root docker-dropin --check; then
     drift=1
     if [[ $MODE == --check ]]; then note "drift: $dropin"; else
-      sudo install -D -m 644 "$S/systemd/docker-after-tailscale.conf" "$dropin" && sudo systemctl daemon-reload
-      note "installed: $dropin"
+      sudo -n nori-root docker-dropin && note "installed: $dropin"
     fi
   fi
 fi
 
+# --- PREFER_IPV4 (opt-in): outgoing connections try IPv4 first, for a flaky IPv6 route. Root-owned, so it goes
+# through the helper. Off: only a gai.conf that is exactly ours is removed; a file you wrote is never touched. ---
+if is_on PREFER_IPV4; then
+  if ! sudo -n nori-root gai-conf --check; then
+    drift=1
+    if [[ $MODE == --check ]]; then note "drift: /etc/gai.conf (PREFER_IPV4=true)"; else
+      sudo -n nori-root gai-conf && note "installed: /etc/gai.conf (prefer IPv4)"
+    fi
+  fi
+elif sudo -n nori-root gai-conf --check; then
+  drift=1
+  if [[ $MODE == --check ]]; then note "drift: /etc/gai.conf is Nori's but PREFER_IPV4 is off"; else
+    sudo -n nori-root gai-conf --remove && note "removed: /etc/gai.conf (PREFER_IPV4 is off)"
+  fi
+fi
+
 # --- firewall sanity: the tailnet must be allowed (bootstrap.sh sets this) ---
-if command -v ufw >/dev/null 2>&1 && ! sudo ufw status 2>/dev/null | grep -q "tailscale0"; then
+if command -v ufw >/dev/null 2>&1 && ! sudo -n nori-root ufw-status 2>/dev/null | grep -q "tailscale0"; then
   note "warning: ufw has no rule for tailscale0 (previews/Plane would be unreachable). Run: sudo ufw allow in on tailscale0"
 fi
 
@@ -163,10 +239,12 @@ if is_on PLANE; then
       note "Plane: ~/plane/plane.env not created yet (Tailscale is not up). Re-run ./setup.sh after 'sudo tailscale up'."
     fi
   fi
-  if is_on PLANE_OFFSITE_BACKUP && [[ ! -f $HOME/.backup-pass && $MODE != --check ]]; then
-    (umask 077; openssl rand -base64 33 > "$HOME/.backup-pass")
-    note "created ~/.backup-pass (backup passphrase). COPY IT to your password manager now: without it the backups can't be read."
-  fi
+fi
+
+# --- passphrase for the encrypted off-site backups (Plane dumps, work snapshots) ---
+if { is_on WORK_BACKUP || is_on PLANE_OFFSITE_BACKUP; } && [[ ! -f $HOME/.backup-pass && $MODE != --check ]]; then
+  (umask 077; openssl rand -base64 33 > "$HOME/.backup-pass")
+  note "created ~/.backup-pass (backup passphrase). COPY IT to your password manager now: without it the backups can't be read."
 fi
 
 if [[ $MODE == --check ]]; then

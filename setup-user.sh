@@ -24,7 +24,7 @@ export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 link "$R" "$HOME/nori"
 for f in "$S"/bin/*; do
   b=$(basename "$f"); nori_bin_wanted "$b" || continue
-  case "$b" in ops-bot|morning-summary|nightly-handoff|plane-backup|plane-offsite|set-token) continue ;; esac  # admin-only
+  case "$b" in ops-bot|morning-summary|nightly-handoff|plane-backup|plane-offsite|work-offsite|set-token) continue ;; esac  # admin-only
   link "$f" "$HOME/.local/bin/$b"
 done
 for d in "$R"/skills/*/ "$R"/local/skills/*/; do
@@ -82,7 +82,7 @@ if is_on POOL_SESSIONS; then
   if [[ $MODE != --check ]]; then
     systemctl --user daemon-reload
     systemctl --user enable "claude-pool@$AREA" >/dev/null 2>&1
-    systemctl --user is-active --quiet "claude-pool@$AREA" || { systemctl --user start "claude-pool@$AREA"; note "started claude-pool@$AREA (first time: run 'claude remote-control' once as $AREA and answer y, see docs/setup-guide.md)"; }
+    systemctl --user is-active --quiet "claude-pool@$AREA" || { systemctl --user start "claude-pool@$AREA"; note "started claude-pool@$AREA (the Claude app needs a browser login for $AREA; after Quick setup see docs/setup-guide.md, 'Claude app after Quick setup'; otherwise run 'claude remote-control' once as $AREA and answer y)"; }
   fi
 elif [[ $MODE != --check ]] && systemctl --user is-enabled --quiet "claude-pool@$AREA" 2>/dev/null; then
   systemctl --user disable --now "claude-pool@$AREA" >/dev/null 2>&1; note "stopped claude-pool@$AREA (POOL_SESSIONS=false)"

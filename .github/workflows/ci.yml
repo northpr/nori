@@ -2,12 +2,16 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 6 * * 1"        # Mondays: try the newest Claude Code (claude-latest job)
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,3 +22,33 @@ jobs:
           files=$(grep -rlE '^#!.*\b(ba)?sh\b' --exclude-dir=.git . || true)
           # shellcheck exits non-zero only for error-level findings with -S error
           shellcheck -S error $files
+
+  # The Claude Code version Nori pins (server/claude-code.version) still accepts every flag Nori uses.
+  # This npm install is the only network use of push/PR CI.
+  claude-pinned:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the pinned Claude Code
+        run: npm i -g "@anthropic-ai/claude-code@$(cat server/claude-code.version)"
+      - name: CLI flag check
+        run: python3 tests/claude_cli_check.py claude
+
+  # Early warning: does the next Claude Code break something Nori uses? Weekly and on demand; never blocks.
+  claude-latest:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the newest Claude Code
+        run: npm i -g @anthropic-ai/claude-code@latest
+      - name: CLI flag check
+        run: python3 tests/claude_cli_check.py claude

@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Token usage from this user's Claude Code transcripts, as JSON (run per area user by ops-bot /usage).
+
+  usage-report            reads ~/.claude/projects/**/*.jsonl (override: USAGE_PROJECTS_DIR)
+Output: {"today": {model: {"in","out","cr","cc"}}, "week": {...}}  (today = the day in TIMEZONE from nori.conf, week = last 7 days)
+Streaming repeats a message across entries, so entries are deduped by message id + requestId (last one wins).
+"""
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+
+
+def local_tz():
+    """TIMEZONE from nori.conf (NORI_CONF / NORI_ROOT / ~/nori), else the TIMEZONE env var, else UTC."""
+    name = os.environ.get("TIMEZONE", "")
+    root = Path(os.environ.get("NORI_ROOT") or Path.home() / "nori")
+    conf = Path(os.environ.get("NORI_CONF") or root / "nori.conf")
+    if not name:
+        try:
+            for line in conf.read_text().splitlines():
+                m = re.match(r"""\s*TIMEZONE=["']?([^"'#\s]+)""", line)
+                if m:
+                    name = m.group(1)
+        except OSError:
+            pass
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return timezone.utc
+
+
+def collect(root, since):
+    seen = {}
+    for f in root.rglob("*.jsonl"):
+        try:
+            if f.stat().st_mtime < since:
+                continue
+            fh = f.open(errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"usage"' not in line or '"assistant"' not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                    m = e["message"]
+                    u = m["usage"]
+                    ts = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
+                except (ValueError, KeyError, TypeError):
+                    continue
+                key = (m.get("id") or e.get("uuid"), e.get("requestId"))
+                seen[key] = (ts, m.get("model") or "?", u)
+    return seen.values()
+
+
+def main():
+    root = Path(os.environ.get("USAGE_PROJECTS_DIR") or Path.home() / ".claude/projects")
+    now = datetime.now(local_tz())
+    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week0 = now - timedelta(days=7)
+    out = {"today": {}, "week": {}}
+    for ts, model, u in collect(root, time.time() - 8 * 86400):
+        if model == "<synthetic>" or ts < week0:
+            continue
+        vals = {"in": u.get("input_tokens"), "out": u.get("output_tokens"),
+                "cr": u.get("cache_read_input_tokens"), "cc": u.get("cache_creation_input_tokens")}
+        for bucket in ("week", "today") if ts >= day0 else ("week",):
+            d = out[bucket].setdefault(model, {"in": 0, "out": 0, "cr": 0, "cc": 0})
+            for k, v in vals.items():
+                d[k] += v or 0
+    json.dump(out, sys.stdout)
+
+
+if __name__ == "__main__":
+    main()

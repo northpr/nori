@@ -4,9 +4,11 @@ After=network-online.target
 ConditionPathExists=%h/projects/%i
 
 [Service]
+EnvironmentFile=-%h/.config/nori/claude.env
 ExecStart=%h/.local/bin/claude-pool %i
 Restart=always
 RestartSec=20
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target

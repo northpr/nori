@@ -16,14 +16,16 @@ link() {
   note "linked: $dst"
 }
 
-# merge_json <partial> <live>: deep-merge partial into live (arrays are replaced); creates live if missing.
+# merge_json <partial> <live>: deep-merge partial into live (arrays are replaced, except permissions.allow: union, live entries first, deduped); creates live if missing.
 merge_json() {
   local part="$1" live="$2" merged
   if [[ ! -f $live ]]; then
     [[ $MODE == --check ]] && { drift=1; note "drift: $live missing"; return 0; }
     mkdir -p "$(dirname "$live")"; echo '{}' > "$live"
   fi
-  merged=$(jq -s '.[0] * .[1]' "$live" "$part")
+  merged=$(jq -s '(.[0].permissions.allow? // []) as $a | (.[1].permissions.allow? // null) as $b | (.[0] * .[1])
+    | if ($b | type) == "array" and ($a | type) == "array"
+      then .permissions.allow = (reduce ($a + $b)[] as $x ([]; if index([$x]) then . else . + [$x] end)) else . end' "$live" "$part")
   [[ "$merged" == "$(jq . "$live")" ]] && return 0
   drift=1
   if [[ $MODE == --check ]]; then note "drift: $live"; return 0; fi

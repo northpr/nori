@@ -3,13 +3,14 @@
 #   set-token <area>   token of the chat bot of that area (written for the area's Linux user)
 #   set-token ops      token of the Ops bot (~/.ops-bot.env)
 #   set-token plane    Plane API key (~/.plane-mcp.env, copied to the areas by setup.sh)
+#   set-token claude USER   Claude token from `claude setup-token` for the admin or an area user
 # Run as the admin user. You are prompted for the secret; typing is hidden.
 set -euo pipefail
 # shellcheck disable=SC1091
 . "$HOME/nori/scripts/conf.sh"
 # shellcheck disable=SC1090
 . "$NORI_ROOT/chat/$CHAT/platform.conf"
-what="${1:?usage: set-token <area|ops|plane>}"
+what="${1:?usage: set-token <area|ops|plane|claude USER>}"
 read -rsp "Paste the secret for '$what' (hidden), then Enter: " tok; echo
 [[ -n $tok ]] || { echo "empty, nothing written" >&2; exit 1; }
 umask 077
@@ -20,6 +21,16 @@ case "$what" in
   plane)
     printf 'PLANE_API_KEY=%s\n' "$tok" > "$HOME/.plane-mcp.env"
     echo "wrote ~/.plane-mcp.env (mode 600). Next: ./setup.sh (copies it to the area users)" ;;
+  claude)
+    who="${2:?usage: set-token claude <$ADMIN_USER|area>}"
+    line="CLAUDE_CODE_OAUTH_TOKEN=$tok"
+    if [[ $who == "$ADMIN_USER" ]]; then
+      mkdir -p "$HOME/.config/nori" && printf '%s\n' "$line" > "$HOME/.config/nori/claude.env"
+    else
+      case " $AREAS " in *" $who "*) ;; *) echo "unknown user '$who'" >&2; exit 2 ;; esac
+      printf '%s\n' "$line" | sudo -u "$who" -H bash -c 'umask 077; mkdir -p "$HOME/.config/nori" && cat > "$HOME/.config/nori/claude.env"'
+    fi
+    echo "wrote the Claude token for '$who' (mode 600). Restart that user's sessions to use it." ;;
   *)
     case " $AREAS " in *" $what "*) ;; *) echo "unknown area '$what' (AREAS=\"$AREAS\")" >&2; exit 2 ;; esac
     dir=".claude/channels/${CHAT_STATE_PREFIX}${what}"

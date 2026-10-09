@@ -9,11 +9,13 @@ SERVER_NAME="nori-server"         # hostname, Tailscale machine name and Remote 
 TIMEZONE="UTC"                    # e.g. Europe/Berlin, Asia/Bangkok (cron times use it)
 LANGUAGES="English"               # languages you write in, e.g. "English and German"
 ADMIN_USER="admin"                # Linux user with sudo: runs the Ops bot, cron, setup.sh
+ADMIN_SUDO="limited"              # limited: passwordless sudo only for what Nori needs, all else asks your password; full: all
+                                  # (limited needs classic sudo: on Ubuntu 26.04, which has sudo-rs, it acts like full for now)
 
 # ---------------------------------------------------------------- chat
 CHAT="telegram"                   # only "telegram" works today (see chat/discord, chat/slack)
-CHAT_ALLOWED_IDS="123456789"      # your numeric chat user id(s), comma separated. Telegram: message
-                                  # @userinfobot, or send /whoami to your Ops bot once it runs.
+CHAT_ALLOWED_IDS="123456789"      # your numeric chat user id(s), comma separated. Telegram: open
+                                  # https://t.me/userinfobot (press Start), or send /whoami to your Ops bot once it runs.
 
 # ---------------------------------------------------------------- areas
 # One area = one always-on Claude session = one Linux user = one bot. Start with one.
@@ -28,6 +30,9 @@ AREA_main_BOT="@your_nori_bot"    # label only, so the rules can name the bot (c
 #   true: posting on GitHub (gh pr review / pr comment / issue comment / pr edit / pr close) asks
 #   you first in this area. Turn it on for an area that works in shared or company repos: teammates
 #   see those comments and reviews under your name, so a wrong one is public and hard to take back.
+# AREA_main_WORK_BACKUP=true
+#   (with WORK_BACKUP=true) false: this area is left out of the nightly work backup entirely. Use it
+#   for an area with company code, unless the backup repo belongs to the company.
 # AREA_main_PLANE_PROJECTS="APP,WEB"
 #   (with PLANE=true) Plane project identifiers that belong to this area: used by recall and by
 #   the Ops bot's `/board <area>`. Unmapped projects count for the first area.
@@ -49,7 +54,7 @@ your-github-name|Your Name|you@example.com
 #   recommended  starter + the Ops bot (/status /progress /restart /ask, alerts, daily digest),
 #                pool sessions (4 per area), browser, previews, recall.
 #   full         recommended + Plane tickets (/board /peek, ticket intake, weekly review), off-site
-#                Plane backups (once PLANE_BACKUP_REPO is set), 8 pool sessions, and GitHub comments
+#                Plane backups (once BACKUP_REPO is set), 8 pool sessions, and GitHub comments
 #                ask first in every area after the first (e.g. "work"). Use an 8 GB server.
 PRESET="recommended"
 
@@ -64,8 +69,16 @@ AUTO_REBOOT_TIME="04:30"          # reboot window for updates; keep it after HAN
 EXTRA_ASK_PERMISSIONS=""          # extra commands that always ask first, e.g. "railway fly vercel"
                                   # (git push and gh pr merge always ask)
 PLANE_WORKSPACE="main"            # Plane workspace slug you create on first login (with PLANE=true)
-PLANE_BACKUP_REPO=""              # e.g. your-github-name/nori-backups (private, create it yourself)
+BACKUP_REPO=""                    # e.g. your-github-name/nori-backups: private repo for the encrypted backups
+                                  # (create it yourself; the older name PLANE_BACKUP_REPO still works)
 PREVIEW_PORT_START=8100           # each area gets a block of 50 ports from here
+
+# ---------------------------------------------------------------- Claude Code version
+# Claude Code doesn't update itself on the server: a new version could break the session, so upgrades
+# are a deliberate step (set this, then ./setup.sh && ./setup.sh --restart). Empty = the version this
+# Nori was tested with (server/claude-code.version). Or an exact version ("2.1.281") to pin or roll back,
+# or "stable" / "latest" to follow a channel (installed when you run ./setup.sh; no drift alert then).
+CLAUDE_CODE_VERSION=""
 
 # ================================================================ overrides (optional)
 # Uncomment a line to override the preset. Values shown are what "recommended" uses.
@@ -84,7 +97,15 @@ PREVIEW_PORT_START=8100           # each area gets a block of 50 ports from here
 # RECALL=true                     # `recall "words"` search over past chats and handoffs
 # BROWSER=true                    # headless browser MCP (Playwright + Chromium) for screenshots
 # PLANE=false                     # self-hosted Plane tickets (docker), plane-mcp, ticket rules, ticket intake
-# PLANE_OFFSITE_BACKUP=false      # encrypted nightly Plane dump pushed to PLANE_BACKUP_REPO
+# PLANE_OFFSITE_BACKUP=false      # encrypted nightly Plane dump pushed to BACKUP_REPO
+# WORK_BACKUP=false               # (any preset; needs BACKUP_REPO) true: encrypted nightly copy of unpushed
+#                                 # commits, uncommitted changes, HANDOFF.md and skills, pushed to BACKUP_REPO.
+#                                 # Off until you turn it on; leave out areas with company code:
+#                                 # AREA_<area>_WORK_BACKUP=false
+
+# PREFER_IPV4=false              # true: outgoing connections try IPv4 first (/etc/gai.conf). Only for the
+#                                 # "bot replies arrive late" case, see docs/troubleshooting.md. Needs
+#                                 # `sudo bash ~/nori/bootstrap.sh` once after updating Nori, then ./setup.sh.
 
 # Filled in automatically by setup.sh once Tailscale is up (the machine's MagicDNS name,
 # e.g. nori-server.tail1234.ts.net). Used for preview and Plane links.

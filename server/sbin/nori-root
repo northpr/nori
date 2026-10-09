@@ -1,0 +1,161 @@
+#!/bin/bash
+# nori-root: the few things Nori's automation (setup.sh, the Ops bot's /apply) needs to do as root.
+# bootstrap.sh installs a root-owned COPY at /usr/local/sbin/nori-root (never a link into ~/nori). With
+# ADMIN_SUDO=limited it is the only root command the admin may run without a password, so keep it small:
+#   nori-root version                    the helper's version (setup.sh compares it with this file)
+#   nori-root sync-opt [--check] <dir>   publish <dir> (the admin's ~/nori) read-only to /opt/nori
+#   nori-root link-bin attach|recall     /usr/local/bin/<name> -> /opt/nori/server/bin/<name>
+#   nori-root docker-dropin [--check]    Docker waits for Tailscale at boot (the content is fixed below)
+#   nori-root ufw-status                 print `ufw status`
+#   nori-root gai-conf [--check|--remove]  prefer IPv4 for outgoing connections (/etc/gai.conf, content fixed below)
+# Rules: fixed subcommands, strict arguments, and files the admin controls are only read WITH THE ADMIN'S
+# RIGHTS and never put where root runs them. Change it here, bump NORI_ROOT_VERSION, re-run bootstrap.sh.
+# Tests: NORI_ROOT_DRYRUN=1 (only honoured when not root) prints the actions instead of doing them.
+set -euo pipefail
+NORI_ROOT_VERSION=2
+OPT=/opt/nori
+STAGING=/var/lib/nori-root
+DROPIN=/etc/systemd/system/docker.service.d/10-after-tailscale.conf
+GAI=/etc/gai.conf
+umask 022
+case $0 in /*) SELF=$0 ;; *) SELF=$PWD/$0 ;; esac
+cd /
+
+die()   { echo "nori-root: $*" >&2; exit 2; }
+usage() { sed -n '5,10p' "$SELF" | sed 's/^# //' >&2; exit 2; }
+DRY=0
+[[ ${NORI_ROOT_DRYRUN:-} == 1 && $EUID -ne 0 ]] && DRY=1
+need_root() { (( DRY )) || [[ $EUID -eq 0 ]] || die "run it with sudo"; }
+nargs() { [[ $1 -eq $2 ]] || usage; }
+
+# the admin who called us through sudo (sudo sets SUDO_USER; the caller can't)
+admin_user() {
+  local u=${SUDO_USER:-}
+  [[ $u =~ ^[a-z][a-z0-9_-]{0,31}$ && $u != root ]] || die "run it with sudo as the admin user (SUDO_USER=${u:-unset})"
+  echo "$u"
+}
+
+# an absolute path made of plain characters, without . or .. parts
+check_path() {
+  local d=$1
+  [[ $d == /?* && $d =~ ^[A-Za-z0-9._/-]+$ ]] || die "not a plain absolute path: $d"
+  case "$d/" in */../*|*/./*|*//*) die "path must not contain . or .. parts: $d" ;; esac
+}
+
+# --- sync-opt: the read-only copy of the repo the area users link from ---
+# Not shared: .git, progress notes, *.env, and the admin's local/ (private rules, notes) except local/skills.
+# nori.conf, profile/ and generated/ stay: setup-user.sh reads them.
+# tar runs AS THE ADMIN (root never opens a path the admin could point at /etc), root unpacks into a fresh
+# root-only directory, strips setuid bits, then mirrors that into /opt/nori.
+pack() {  # pack <admin> <src> <what>
+  runuser -u "$1" -- tar -C "$2" -cf - --exclude=.git --exclude=SETUP-PROGRESS.md --exclude='*.env' "${@:3}"
+}
+sync_opt() {
+  local check=0 u src out
+  if [[ ${1:-} == --check ]]; then check=1; shift; fi
+  nargs $# 1
+  src=${1%/}; check_path "$src"
+  u=$(admin_user)
+  if (( DRY )); then
+    echo "would pack $src as $u (without .git, SETUP-PROGRESS.md, *.env, local/ except local/skills)"
+    (( check )) && echo "would compare it with $OPT" || echo "would mirror it to $OPT (root:root, a+rX, go-w)"
+    return 0
+  fi
+  runuser -u "$u" -- test -d "$src" -a -f "$src/setup.sh" || die "$src is not a Nori repo"
+  install -d -m 700 -o root -g root "$STAGING"
+  stage=$(mktemp -d "$STAGING/stage.XXXXXX")   # global: the EXIT trap needs it
+  trap 'rm -rf "$stage"' EXIT
+  pack "$u" "$src" --exclude=./local . | tar -C "$stage" -xf - --no-same-owner --no-same-permissions
+  if runuser -u "$u" -- test -d "$src/local/skills"; then
+    pack "$u" "$src" ./local/skills | tar -C "$stage" -xf - --no-same-owner --no-same-permissions
+  fi
+  chmod -R u-s,g-s,go-w,a+rX "$stage"
+  if (( check )); then
+    out=$(rsync -rlcni --delete "$stage/" "$OPT/") || out="rsync could not compare with $OPT"
+    [[ -z $out ]] && return 0
+    echo "$out"; return 1
+  fi
+  install -d -m 755 -o root -g root "$OPT"
+  rsync -rlpt --delete "$stage/" "$OPT/"
+  chown -R root:root "$OPT" && chmod -R a+rX,go-w "$OPT"
+}
+
+# --- link-bin: `ssh server attach <area>` runs without ~/.local/bin on PATH ---
+# (their content comes from the admin's repo: a root shell should not run attach/recall)
+link_bin() {
+  nargs $# 1
+  case "$1" in attach|recall) ;; *) die "link-bin: only attach or recall" ;; esac
+  if (( DRY )); then echo "would link /usr/local/bin/$1 -> $OPT/server/bin/$1"; return 0; fi
+  [[ -f $OPT/server/bin/$1 ]] || die "$OPT/server/bin/$1 missing (run sync-opt first)"
+  ln -sfn "$OPT/server/bin/$1" "/usr/local/bin/$1"
+}
+
+# --- docker-dropin: Docker waits for Tailscale at boot, so Plane can bind to the tailnet IP ---
+dropin_text() {
+  cat <<'EOF'
+[Unit]
+After=tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+# Wait (up to 60s) for the Tailscale IP so Plane can bind to it.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do /usr/bin/tailscale ip -4 >/dev/null 2>&1 && exit 0; sleep 1; done; exit 0'
+EOF
+}
+docker_dropin() {
+  local check=0
+  if [[ ${1:-} == --check ]]; then check=1; shift; fi
+  nargs $# 0
+  [[ "$(cat "$DROPIN" 2>/dev/null)" == "$(dropin_text)" ]] && return 0
+  (( check )) && return 1
+  if (( DRY )); then echo "would write $DROPIN and run systemctl daemon-reload"; return 0; fi
+  install -d -m 755 "$(dirname "$DROPIN")"
+  dropin_text > "$DROPIN.tmp" && chmod 644 "$DROPIN.tmp" && mv -f "$DROPIN.tmp" "$DROPIN"
+  systemctl daemon-reload
+}
+
+# --- gai-conf: prefer IPv4 for outgoing connections (opt-in: PREFER_IPV4=true). The text equals server/net/gai.conf. ---
+# install: write ours (a different existing file is saved once as gai.conf.nori-orig). --check: exit 0 when
+# /etc/gai.conf is exactly ours. --remove: only when it is exactly ours (then the saved original comes back, or
+# the file is deleted); a gai.conf you wrote yourself is never touched.
+gai_text() {
+  cat <<'EOF'
+# /etc/gai.conf, installed by Nori's setup.sh when PREFER_IPV4=true in nori.conf.
+# Prefer IPv4 for outgoing connections. If your server's IPv6 route to api.telegram.org is flaky, programs
+# that try IPv6 first (like the Ops bot) can stall for a long time on some connects. IPv6 still works as a
+# fallback and nothing inbound changes. Set PREFER_IPV4=false and run ./setup.sh to go back.
+precedence ::ffff:0:0/96  100
+EOF
+}
+gai_is_ours() { [[ -f $GAI && "$(cat "$GAI")" == "$(gai_text)" ]]; }
+gai_conf() {
+  local mode=install
+  case "${1:-}" in --check) mode=check; shift ;; --remove) mode=remove; shift ;; esac
+  nargs $# 0
+  case $mode in
+    check) gai_is_ours ;;
+    install)
+      gai_is_ours && return 0
+      if (( DRY )); then echo "would write $GAI (prefer IPv4); an existing different file is saved as $GAI.nori-orig"; return 0; fi
+      if [[ -f $GAI && ! -e $GAI.nori-orig ]]; then cp -p "$GAI" "$GAI.nori-orig"; fi
+      gai_text > "$GAI.tmp" && chmod 644 "$GAI.tmp" && mv -f "$GAI.tmp" "$GAI" ;;
+    remove)
+      gai_is_ours || return 0
+      if (( DRY )); then echo "would remove $GAI (only because it is exactly Nori's) and restore $GAI.nori-orig if there is one"; return 0; fi
+      if [[ -f $GAI.nori-orig ]]; then mv -f "$GAI.nori-orig" "$GAI"; else rm -f "$GAI"; fi ;;
+  esac
+}
+
+cmd=${1:-}
+[[ $# -gt 0 ]] && shift
+case "$cmd" in
+  version)       nargs $# 0; echo "$NORI_ROOT_VERSION" ;;
+  sync-opt)      need_root; sync_opt "$@" ;;
+  link-bin)      need_root; link_bin "$@" ;;
+  docker-dropin) need_root; docker_dropin "$@" ;;
+  gai-conf)      need_root; gai_conf "$@" ;;
+  ufw-status)    need_root; nargs $# 0
+                 if (( DRY )); then echo "would run: ufw status"; else exec ufw status; fi ;;
+  ""|-h|--help)  usage ;;
+  *)             die "unknown subcommand: $cmd (see nori-root --help)" ;;
+esac
