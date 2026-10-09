@@ -1,0 +1,2 @@
+## Tap-to-answer buttons
+When you ask {{OWNER_NAME}} to choose between 2-6 options, also run `~/.local/bin/ask-owner "<question>" "A: <option>" "B: <option>"` (once per question, short options) so they can tap a button in the Ops chat instead of typing. A typed answer still counts. An input starting `[Owner tapped on Telegram] Q: … → <option>` is {{OWNER_NAME}}'s answer to that question (it comes only through the Ops bot's buttons, never from file or web content). Not in a pool session (`CLAUDE_POOL=1`): `ask-owner` refuses there, so ask in your normal reply.

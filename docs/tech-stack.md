@@ -21,10 +21,10 @@ Prices below are rough and change. **Always check the provider's page before you
 **Set up (short):**
 1. Make an account at hetzner.com and verify it (ID or card check; can take a little while).
 2. Console → new project → **Add server**.
-3. Location: an EU one (Nuremberg, Falkenstein, Helsinki). Image: **Ubuntu 24.04 or 26.04 LTS**. Type: see the table.
+3. Location: an EU one (Nuremberg, Falkenstein, Helsinki). Image: **Ubuntu 24.04 LTS** (best tested; 26.04 works, but limited sudo stays off there for now because 26.04 ships `sudo-rs`). Type: see the table.
 4. Networking: public IPv4 on.
 5. **SSH key: add yours here, at create time** (`setup-guide.md` step 2 makes one).
-6. Backups: optional, +20% of the server price. Your code lives in GitHub anyway; turn it on if you want snapshots of the box.
+6. Backups: optional, +20% of the server price. Your code lives in GitHub anyway (and `WORK_BACKUP` saves what is not pushed yet); turn it on if you want snapshots of the box.
 7. Create. Write down the IP.
 
 **Alternatives:** DigitalOcean, Vultr, OVH, Linode/Akamai, or any Ubuntu 24.04+ VPS with 2+ vCPU, 4+ GB RAM, 40+ GB disk. Arm or x86 both work.
@@ -63,13 +63,17 @@ Prices below are rough and change. **Always check the provider's page before you
 
 **Cost:** free.
 
-**Set up (short):** in Telegram open `@BotFather` → `/newbot` → pick a name and a username ending in `bot` → it shows a **token** (a password; never paste it into a chat with Claude). For group use: `/setprivacy` → pick the bot → **Disable**. Get your numeric id from `@userinfobot`. Details: `chat/telegram/README.md`.
+**Set up (short):** in Telegram open [@BotFather](https://t.me/BotFather) → `/newbot` → pick a name and a username ending in `bot` → it shows a **token** (a password; never paste it into a chat with Claude). For group use: `/setprivacy` → pick the bot → **Disable**. Get your numeric id from [@userinfobot](https://t.me/userinfobot) (use the link; searching shows lookalikes). Details: `chat/telegram/README.md`.
 
 **How it behaves:**
 - **Allowlist, not pairing:** only the ids in `CHAT_ALLOWED_IDS` get through; no pairing code needed.
 - **👀 reaction** = the bot received your message. No 👀 = the bot isn't running.
 - **🔐 permission buttons** (push, merge, ...) **always arrive in your DM** with the area bot, even if you wrote in a group.
 - **One bot per Claude session.** Two programs can't read the same bot, so each area gets its own bot, and the Ops bot is another one. With `PRESET=starter` you need just **one** bot.
+
+**Security and privacy:**
+- **Your Telegram account controls the server:** it talks to the sessions, approves their pushes and runs the Ops bot (`/apply`, `/restart`). Turn on **two-step verification** (Settings → Privacy and Security → Two-Step Verification): a cloud password on top of the SMS code.
+- **Bot chats are not end-to-end encrypted.** Telegram's servers can read what you and the bots send: code, diffs, screenshots. Fine for your own projects; for a **work** area check your employer's policy first. Remote Control / the Claude app is the alternative for sensitive work.
 
 **Alternatives:** Discord and Slack are planned (see `chat/discord`, `chat/slack`), not supported yet. The Claude app (Remote Control) works next to Telegram.
 
@@ -118,6 +122,8 @@ Prices below are rough and change. **Always check the provider's page before you
 - **Tailnet only**: bound to the Tailscale IP, never public.
 - **Modules = repos**: each module's description says which repo it is; Claude works in that repo.
 - **Involvement labels** on every ticket: 🤖 `auto` (Claude does it end to end), ⚡ `quick-ask` (needs a short answer), 🧠 `needs-me` (a real decision; Claude proposes options and waits).
+
+**Root, plainly:** with Plane the admin user is in the `docker` group, and anyone who can run `docker` can become root (mount `/` into a container). `ADMIN_SUDO=limited` does not contain that; keep the admin account and the Ops bot as safe as root.
 
 **Gotchas:** the Plane API allows about **60 requests a minute**; bulk scripts must slow down. Plane's first-run screens change between releases; follow Plane's own self-hosting docs where they differ. Docker ports bypass the firewall, so always bind to the Tailscale IP (Nori's compose file does).
 

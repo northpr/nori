@@ -11,7 +11,7 @@ Send "fix the export bug" from the bus. Claude works on your server while your l
 Nori is a template plus a friendly setup guide. Clone it, open it on your laptop, run `claude`, and say "hi Nori". Nori (the guide in `CLAUDE.md`) walks you through buying a small server, connecting to it, creating your chat bots and switching everything on, one step at a time, and writes down its progress so you can stop and resume.
 
 ```
-git clone <your copy of this repo> nori && cd nori && claude
+git clone -b develop https://github.com/northpr/nori && cd nori && claude
 ```
 then type: `hi Nori`
 
@@ -68,6 +68,7 @@ One line in `nori.conf`, `PRESET=starter|recommended|full`, picks the feature se
 | **Ops bot**: `/status` `/progress` `/restart` `/ask`, alerts, daily digest | | ✅ | ✅ |
 | Session pool (extra sessions from the Claude app) | | ✅ (4) | ✅ (8) |
 | Browser screenshots, phone previews, recall | | ✅ | ✅ |
+| Encrypted nightly backup of unpushed work (opt-in: `WORK_BACKUP=true` + `BACKUP_REPO`) | ✅ | ✅ | ✅ |
 | **Plane** tickets, `/board` `/peek`, ticket intake, weekly review, off-site backups | | | ✅ |
 | Bots to create | 1 | 2 | 2 + 1 per extra area |
 | Server | 4 GB | 4 GB | 8 GB |
@@ -76,9 +77,12 @@ One line in `nori.conf`, `PRESET=starter|recommended|full`, picks the feature se
 - One always-on Claude session per area on your server (systemd + tmux, also reachable from the Claude app via Remote Control).
 - A **Telegram chat bot** to talk to it: short phone-friendly replies, progress updates, 🔐 permission requests in your DM.
 - An **Ops bot** (a small script, not Claude; optional): `/status`, `/progress`, `/restart`, `/apply`, alerts when something dies or memory runs low, a daily digest, and `/ask <question>`. Without it you run just one Claude + one chat bot, and the digest comes through your chat bot.
+  - The Ops bot reacts with 👀 to every command from you, shows a 🔐 permission card with just the command (Allow / Deny buttons) and builds slow answers like `/board` in the background, so it stays responsive.
+  - Ops bot extras: `/usage` (token use per area and plan-limit %), `/recall <words>` (search past chats, handoffs and tickets), "still on it" pings while a long task runs, tap-to-answer buttons (Claude's A/B questions become buttons via `ask-owner`), an alert if the chat bot's connection to Telegram goes quiet, and with Plane a ▶️ **Do it** button on ticket cards. `/allow <id> <name> <area>` lets a teammate work in one area, and `/workgroup <area>` binds a group chat to an area.
 - A **session pool** per area: start several extra Claude sessions from the Claude app or claude.ai/code next to the chat session.
 - **Nightly handoff + fresh restart:** each night the session writes a handoff note, then restarts with a clean context and picks up from the note.
 - **Git identity per repo owner** (personal vs company accounts) with a pre-commit guard, a `gh` wrapper, and ask-first rules for pushes and merges.
+- **Encrypted nightly backups** of what isn't on GitHub yet (unpushed commits, uncommitted changes, handoff notes, skills) to your private repo.
 - **Plane** tickets (self-hosted, Docker), encrypted off-site backups, **previews** on your phone through Tailscale, **recall** over past chats, a headless **browser**.
 - **More areas**, e.g. `personal` and `work`, each its own Linux user, session and bot, unable to read each other's files. Per area you can make GitHub reviews and comments ask first.
 - `cc-slash` (send `/clear`, `/compact`, `/model ...` from the chat), `attach` (look into the session).
@@ -97,9 +101,11 @@ Other chat platforms (Discord, Slack) are planned, not supported yet. The Ops bo
 - [docs/troubleshooting.md](docs/troubleshooting.md): when something doesn't work
 
 ## Quickstart
-1. `git clone` this repo on your laptop, `cd nori`, install [Claude Code](https://docs.claude.com/en/docs/claude-code), run `claude`.
+1. You need [Claude Code](https://docs.claude.com/en/docs/claude-code). Then run `git clone -b develop https://github.com/northpr/nori && cd nori && claude` (Nori does the rest in chat; if you have a question at any point, just ask Nori in that Claude window). On a Mac, the first `git` may show a popup asking to install Apple's developer tools: click Install (about 5 min, free), then run the command again.
 2. Say **hi Nori**. Nori asks which preset you want (starter, recommended or full), a few more questions, writes `nori.conf` for you, and guides you through the rest.
 3. Prefer doing it yourself? Follow `docs/setup-guide.md`.
+
+Fastest, after writing nori.conf (Step 0): `./nori up` (beta, being tested; Quick setup in docs/setup-guide.md). If something stops, the step-by-step guide always works.
 
 ## Layout
 ```
@@ -124,13 +130,20 @@ docs/                 setup-guide, tech-stack, recommendations, troubleshooting,
 ```
 
 ## Updating later
-`git pull` on your laptop (your `nori.conf`, `profile/USER.md`, `local/` and `SETUP-PROGRESS.md` are gitignored), copy the repo to the server (`rsync -a --exclude .git --exclude generated ./ <server>:nori/`), then on the server `cd ~/nori && ./setup.sh` (add `--restart` if rules or settings changed). Details in `docs/setup-guide.md`.
+`git pull` on your laptop (your `nori.conf`, `profile/USER.md`, `local/` and `SETUP-PROGRESS.md` are gitignored), copy the repo to the server (`rsync -a --exclude .git --exclude generated ./ <server>:nori/`), then on the server `cd ~/nori && ./setup.sh` (add `--restart` if rules or settings changed). Claude Code itself is pinned to a tested version and doesn't update itself; upgrade it on purpose with `CLAUDE_CODE_VERSION` in `nori.conf`. Details in `docs/setup-guide.md`.
 
 ## Safety model in short
+Who can do what:
+- **Your Telegram account** is the remote control. Whoever gets into it can tell the area sessions to run code as the area users, approve their 🔐 pushes and merges, and use the Ops bot (`/apply` re-runs `setup.sh` as the admin, `/restart <area>`). **Turn on Telegram's two-step verification** (Settings → Privacy and Security → Two-Step Verification, a cloud password).
+- **The admin account** (`ADMIN_USER`, your SSH login) runs `setup.sh`, cron and the Ops bot. With `ADMIN_SUDO=limited` (the default) it may act as the area users and run the small root helper `nori-root` without a password; anything else as root asks for the admin's password. So a stolen Telegram account or a bug in the Ops bot doesn't mean passwordless root. `ADMIN_SUDO=full` is passwordless root for everything. `limited` needs classic sudo; on Ubuntu 26.04 (`sudo-rs`) bootstrap keeps `full` until it's tested there. With `PLANE=true` the admin is also in the `docker` group, which is as good as root; `limited` doesn't change that.
+- **Area users** run the Claude sessions: no sudo, and they can't read each other's or the admin's files.
+
+And:
 - Tokens live only in files on the server (written with a hidden prompt via `set-token`), never in git, `nori.conf` or a chat.
-- Area sessions run as separate Linux users without sudo; firewall closed except SSH and the Tailscale interface.
+- Firewall closed except SSH and the Tailscale interface.
 - Areas are separated for projects, chats, Claude state and `local/` rules. They are **not** separated for Plane: all areas share one Plane API key, so every session can read and change every project's tickets. `nori.conf` and the profile in `/opt/nori` are readable by every area user, so keep secrets out of them. If a colleague shares your server, give them their own server or Plane workspace.
-- `git push`, `gh pr merge` and any command in `EXTRA_ASK_PERMISSIONS` are caught by ask rules, and a `push-guard` hook also asks for `git -C repo push`, `gh api ... merge` and similar spellings. A script Claude writes that pushes internally is not inspected. Pool sessions run with `--permission-mode auto`: confirm on your server that the ask rules and the hook still prompt there. (Plus GitHub comments/reviews in areas with `ASK_BEFORE_GITHUB_COMMENTS=true`.) No production secrets belong on the box.
+- **A "work" area sends company code, diffs and screenshots through Telegram**, and Telegram bot chats are **not end-to-end encrypted**. Check your employer's policy first. For sensitive work use Remote Control / the Claude app instead of a chat bot.
+- `git push`, `gh pr merge` and any command in `EXTRA_ASK_PERMISSIONS` are caught by ask rules (the push/merge ones also in root-owned managed settings, which a session can't edit away), and a `push-guard` hook also asks for `git -C repo push`, `gh api ... merge` and similar spellings. A script Claude writes that pushes internally is not inspected. Claude Code's docs say explicit ask rules prompt in every permission mode, including the auto mode pool sessions use. (Plus GitHub comments/reviews in areas with `ASK_BEFORE_GITHUB_COMMENTS=true`.) No production secrets belong on the box.
 
 ## Contributing
 Improvements are welcome. Use a branch and a pull request; see [CONTRIBUTING.md](CONTRIBUTING.md).

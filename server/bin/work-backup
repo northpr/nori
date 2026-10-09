@@ -1,0 +1,287 @@
+#!/usr/bin/python3 -I
+# Collects the work that exists only on this server, for the Linux user that runs it (one area):
+#   work-backup collect > area.tar.gz
+# For every git repo under ~/projects: a bundle of the commits on no remote (branches, tags, a detached
+# HEAD and the newest stash), the uncommitted and untracked (not ignored) files, STATUS.txt; plus
+# ~/projects/<area>/HANDOFF.md, ~/.claude/skills/ and MANIFEST.txt. Read-only: no stash, no refs, no index
+# writes. work-offsite (admin, cron) runs it from /opt/nori as each area user, encrypts the result and
+# pushes it to BACKUP_REPO.
+# Problems (a repo it could not read, a file or bundle left out because of a size limit, ...) go to stderr;
+# the tar is still complete. Files that look like secrets are left out on purpose (SKIPPED.txt, no problem).
+# Exit 0 unless it broke.
+import fnmatch
+import io
+import os
+import pwd
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+MB = 1024 * 1024
+MAX_FILE = 20 * MB               # bigger files are listed in SKIPPED.txt and reported, not saved
+MAX_TOTAL = 90 * MB              # everything for one area together (GitHub refuses files over 100 MB)
+RESERVE = 1 * MB                 # of MAX_TOTAL, kept back for MANIFEST.txt
+MAX_DEPTH = 4                    # like morning-summary: find ~/projects -maxdepth 4 -name .git
+MAX_REPORTED = 10                # per repo: more skipped files are only counted on stderr (all are in SKIPPED.txt)
+# uncommitted files with these names (in any directory) are left out: they usually hold secrets
+SECRET_NAMES = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",
+                "*.p12", "*.pfx", "credentials.json", ".netrc", ".npmrc", ".pypirc")
+GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+problems = []
+
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", repo, *args], env=GIT_ENV, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+
+
+def mb(n):
+    return f"{n / MB:.1f} MB"
+
+
+def looks_secret(name):
+    base = os.path.basename(name)
+    return any(fnmatch.fnmatchcase(base, p) for p in SECRET_NAMES)
+
+
+def find_repos(root):
+    """Directories under root with a .git entry at most MAX_DEPTH levels down (symlinks not followed)."""
+    repos = []
+    base = root.rstrip("/").count("/")
+    for dirpath, dirnames, filenames in os.walk(root):
+        depth = dirpath.rstrip("/").count("/") - base + 1   # depth of this dir's children
+        if ".git" in dirnames or ".git" in filenames:
+            repos.append(dirpath)
+        dirnames[:] = [d for d in dirnames if d != ".git"] if depth < MAX_DEPTH else []
+    return sorted(repos)
+
+
+class Skip(Exception):
+    """A file left out because of a size limit (a problem: reported on stderr)."""
+
+
+class Out:
+    """The tar being written and what is left of the area's MAX_TOTAL."""
+
+    def __init__(self, tar):
+        self.tar = tar
+        self.left = MAX_TOTAL - RESERVE
+
+    def add_bytes(self, name, data):
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        info.mtime = int(time.time())
+        info.mode = 0o644
+        self.tar.addfile(info, io.BytesIO(data))
+        self.left -= len(data)
+
+    def add_file(self, path, name):
+        """Adds a file or symlink as its own entry, never as a tar hard link (a link could point at a file
+        that was left out). Returns a note for SKIPPED.txt or None; raises Skip (size limit) or OSError.
+        The data is read first, at most limit+1 bytes, so a file changing meanwhile can't break the tar."""
+        st = os.lstat(path)
+        info = tarfile.TarInfo(name)
+        info.mtime = int(st.st_mtime)
+        if stat.S_ISLNK(st.st_mode):
+            info.type, info.linkname, info.mode = tarfile.SYMTYPE, os.readlink(path), 0o777
+            self.tar.addfile(info)
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            return "not a regular file"
+        self.check_size(st.st_size)
+        limit = min(MAX_FILE, self.left)
+        # O_NONBLOCK: never hang on a file swapped for a FIFO since the lstat
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return "not a regular file"
+            data = f.read(limit + 1)
+        if len(data) > limit:
+            raise Skip(f"grew to over {mb(limit)} while reading, over the "
+                       + (f"{MAX_FILE // MB} MB per-file limit" if limit == MAX_FILE else
+                          f"{MAX_TOTAL // MB} MB total for this area"))
+        info.size, info.mode = len(data), stat.S_IMODE(st.st_mode)
+        self.tar.addfile(info, io.BytesIO(data))
+        self.left -= len(data)
+        return "changed while reading" if len(data) != st.st_size else None
+
+    def check_size(self, size):
+        if size > MAX_FILE:
+            raise Skip(f"{mb(size)}, over the {MAX_FILE // MB} MB per-file limit")
+        if size > self.left:
+            raise Skip(f"{mb(size)}, over the {MAX_TOTAL // MB} MB total for this area")
+
+    def add_tree(self, src, name):
+        """Adds a directory without following symlinks (links to the shared skills stay links)."""
+        for dirpath, dirnames, filenames in os.walk(src):
+            rel = os.path.relpath(dirpath, src)
+            for n in sorted(filenames) + sorted(d for d in dirnames if os.path.islink(os.path.join(dirpath, d))):
+                self.add_always(os.path.join(dirpath, n), os.path.normpath(os.path.join(name, rel, n)))
+
+    def add_always(self, path, name):
+        """HANDOFF.md and skills: added before the repos, so they always fit; anything odd is a problem."""
+        try:
+            note = self.add_file(path, name)
+        except Skip as e:
+            note = f"skipped, {e}"
+        except OSError as e:
+            note = e.strerror
+        if note:
+            problems.append(f"{path}: {note}")
+
+
+def report(repo, skipped):
+    """Puts the files left out by a size limit on stderr (the first MAX_REPORTED, then a count)."""
+    for line in skipped[:MAX_REPORTED]:
+        problems.append(f"{repo}: left out {line}")
+    if len(skipped) > MAX_REPORTED:
+        problems.append(f"{repo}: ... and {len(skipped) - MAX_REPORTED} more left out (see SKIPPED.txt)")
+
+
+def backup_repo(out, tmp, repo, prefix):
+    """Adds one repo under prefix; returns the manifest line."""
+    notes, skipped, over = [], [], []
+    branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.decode(errors="replace").strip() or "?"
+    has_remote = bool(git(repo, "remote").stdout.strip())
+
+    # commits on no remote: branches, tags, a detached HEAD and the newest stash (refs/stash is only read);
+    # all of them when the repo has no remote (--all includes those too)
+    bundle = os.path.join(tmp, "unpushed.bundle")
+    if has_remote:
+        refs = ["--branches", "--tags"]
+        refs += [r for r in ("HEAD", "refs/stash") if git(repo, "rev-parse", "-q", "--verify", r).returncode == 0]
+        refs += ["--not", "--remotes"]
+    else:
+        refs = ["--all"]
+    r = git(repo, "bundle", "create", bundle, *refs)
+    if r.returncode == 0 and os.path.exists(bundle):
+        count = git(repo, "rev-list", "--count", *refs).stdout.decode().strip()
+        size = os.path.getsize(bundle)
+        if size > out.left:
+            line = (f"unpushed.bundle  ({mb(size)}, {count} commit(s), over the {MAX_TOTAL // MB} MB total"
+                    " for this area: these commits are NOT saved)")
+            skipped.append(line)
+            over.append(line)
+            notes.append(f"bundle of {count} commit(s) SKIPPED (too big)")
+        else:
+            info = tarfile.TarInfo(f"{prefix}/unpushed.bundle")
+            info.size, info.mtime, info.mode = size, int(time.time()), 0o644
+            with open(bundle, "rb") as f:
+                out.tar.addfile(info, f)
+            out.left -= size
+            notes.append(f"bundle {count} commit(s)" + ("" if has_remote else " (no remote: whole history)"))
+    elif b"empty bundle" in r.stderr:
+        notes.append("nothing unpushed")
+    else:
+        msg = r.stderr.decode(errors="replace").strip().splitlines()
+        notes.append("bundle FAILED: " + (msg[-1] if msg else f"exit {r.returncode}"))
+        problems.append(f"{repo}: {notes[-1]}")
+    if os.path.exists(bundle):
+        os.remove(bundle)
+
+    # uncommitted work: modified + untracked-not-ignored + staged (the working tree version)
+    names = set()
+    for args in (["ls-files", "-z", "-m", "-o", "--exclude-standard"], ["diff", "--cached", "--name-only", "-z"]):
+        r = git(repo, *args)
+        if r.returncode == 0:
+            names.update(n.decode("utf-8", "surrogateescape") for n in r.stdout.split(b"\0") if n)
+        else:
+            notes.append(f"git {args[0]} FAILED")
+            problems.append(f"{repo}: {notes[-1]}")
+    saved = 0
+    for name in sorted(names):
+        path = os.path.join(repo, name)
+        if name.endswith("/") or not os.path.lexists(path) or os.path.isdir(path) and not os.path.islink(path):
+            continue   # deleted (see STATUS.txt), or an untracked nested repo (backed up on its own)
+        if looks_secret(name):
+            skipped.append(f"{name}  excluded (looks like a secret)")
+            continue
+        try:
+            note = out.add_file(path, f"{prefix}/files/{name}")
+        except Skip as e:
+            skipped.append(f"{name}  ({e})")
+            over.append(skipped[-1])
+            continue
+        except OSError as e:
+            skipped.append(f"{name}  (unreadable: {e.strerror})")
+            continue
+        if note:
+            skipped.append(f"{name}  ({note})")
+            if note == "not a regular file":
+                continue
+        saved += 1
+    if names:
+        notes.append(f"{saved} uncommitted file(s)")
+    if skipped:
+        out.add_bytes(f"{prefix}/SKIPPED.txt", ("\n".join(skipped) + "\n").encode())
+        notes.append(f"{len(skipped)} skipped (SKIPPED.txt)")
+    report(repo, over)
+
+    status = git(repo, "status", "--porcelain=v1", "-b").stdout
+    stashes = git(repo, "stash", "list").stdout   # reads the stash reflog; only the newest is in the bundle
+    out.add_bytes(f"{prefix}/STATUS.txt", f"branch: {branch}\n\n".encode() + status
+                  + (b"\nstashes (the newest, refs/stash, is in unpushed.bundle):\n" + stashes if stashes else b""))
+    return f"{prefix}: branch {branch}; " + "; ".join(notes)
+
+
+def collect(out_file):
+    home = os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir
+    user = pwd.getpwuid(os.getuid()).pw_name
+    projects = os.path.join(home, "projects")
+    manifest = [f"host: {socket.gethostname()}", f"area user: {user}",
+                f"date: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}", ""]
+    with tempfile.TemporaryDirectory() as tmp, tarfile.open(fileobj=out_file, mode="w|gz") as tar:
+        out = Out(tar)
+        # first the small things that must always be there: the handoff note, <area>/<area>/HANDOFF.md
+        # (same path as under ~/projects), and the skills the session saved, <area>/.claude/skills/
+        handoff = os.path.join(projects, user, "HANDOFF.md")
+        tail = [""]
+        if os.path.isfile(handoff):
+            out.add_always(handoff, f"{user}/{user}/HANDOFF.md")
+            tail.append(f"handoff: {user}/{user}/HANDOFF.md")
+        else:
+            tail.append("handoff: none")
+        skills = os.path.join(home, ".claude", "skills")
+        if os.path.isdir(skills):
+            out.add_tree(skills, f"{user}/.claude/skills")
+            tail.append(f"skills: {user}/.claude/skills ({len(os.listdir(skills))} entries)")
+        else:
+            tail.append("skills: none")
+        # repos: <area>/<path under ~/projects>/{unpushed.bundle,files/,STATUS.txt,SKIPPED.txt}
+        repos = find_repos(projects) if os.path.isdir(projects) else []
+        manifest.append(f"repos ({len(repos)}):")
+        for repo in repos:
+            rel = os.path.relpath(repo, projects)
+            prefix = f"{user}/{rel}" if rel != "." else f"{user}/_projects"
+            try:
+                line = backup_repo(out, tmp, repo, prefix)
+            except (OSError, subprocess.SubprocessError) as e:
+                line = f"{prefix}: FAILED ({e})"
+                problems.append(line)
+            manifest.append("  " + line)
+        manifest += tail
+        if problems:
+            manifest += ["", "problems:"] + ["  " + p for p in problems]
+        out.add_bytes(f"{user}/MANIFEST.txt", ("\n".join(manifest) + "\n").encode())
+    for p in problems:
+        print(f"work-backup ({user}): {p}", file=sys.stderr)
+    return 0
+
+
+def main():
+    if sys.argv[1:] != ["collect"]:
+        print("usage: work-backup collect > backup.tar.gz   (run as the area user)", file=sys.stderr)
+        return 2
+    if sys.stdout.isatty():
+        print("work-backup: refusing to write a tar to the terminal; redirect it to a file", file=sys.stderr)
+        return 2
+    rc = collect(sys.stdout.buffer)
+    sys.stdout.buffer.flush()
+    return rc
+
+
+sys.exit(main())

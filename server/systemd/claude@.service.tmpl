@@ -5,6 +5,7 @@ After=network-online.target
 ConditionPathExists=%h/.claude/channels/{{CHAT_STATE_PREFIX}}%i/.env
 
 [Service]
+EnvironmentFile=-%h/.config/nori/claude.env
 Type=forking
 ExecStart=/usr/bin/tmux -L claude-%i new-session -d -s claude-%i -x 220 -y 50 %h/.local/bin/claude-session %i
 ExecStop=/usr/bin/tmux -L claude-%i kill-session -t claude-%i

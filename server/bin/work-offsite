@@ -1,0 +1,109 @@
+#!/bin/bash
+# Nightly (cron, as the admin): back up the work that exists only on this server. For each area user,
+# work-backup collects unpushed commits, uncommitted changes, HANDOFF.md and skills; this encrypts
+# them (gpg AES256, passphrase in ~/.backup-pass; keep a copy OFF the server, e.g. in your password
+# manager) into ~/backups/work/<area>-YYYYMMDD.tar.gz.gpg (newest 7 per area kept) and pushes those
+# files to the branch work-snapshots of your private BACKUP_REPO. That branch is recreated each night
+# (one commit, force push), so the repo doesn't grow forever. The Plane dumps on the default branch stay
+# untouched; it refuses to push when work-snapshots is the default branch or holds anything else.
+# Restore: docs/troubleshooting.md.
+set -euo pipefail
+# shellcheck disable=SC1091
+. "$HOME/nori/scripts/conf.sh"
+[[ -n $BACKUP_REPO ]] || { echo "BACKUP_REPO is empty" >&2; exit 1; }
+[[ -s $HOME/.backup-pass ]] || { echo "no ~/.backup-pass (run ./setup.sh)" >&2; exit 1; }
+dir="$HOME/backups/work"
+repo="$HOME/backups/offsite-work"
+url="https://github.com/$BACKUP_REPO.git"
+day=$(date +%Y%m%d)
+failed=0
+mkdir -p "$dir"
+errs=$(mktemp); trap 'rm -f "$errs" "$dir"/*.tmp' EXIT
+
+# 1. collect + encrypt, one file per area (the plain tar never touches the disk);
+#    an area with AREA_<a>_WORK_BACKUP=false is left out entirely (not collected, not published)
+areas=()
+for a in $AREAS; do
+  if [[ $(area_var "$a" WORK_BACKUP) == false ]]; then echo "$(date) $a skipped (AREA_${a}_WORK_BACKUP=false)"; continue; fi
+  areas+=("$a")
+  id "$a" >/dev/null 2>&1 || continue
+  out="$dir/$a-$day.tar.gz.gpg"
+  if (cd / && sudo -n -u "$a" -H /opt/nori/server/bin/work-backup collect 2>"$errs") \
+     | gpg --batch --yes --pinentry-mode loopback --passphrase-file "$HOME/.backup-pass" \
+           --symmetric --cipher-algo AES256 -o "$out.tmp"; then
+    mv "$out.tmp" "$out"
+    echo "$(date) $a ok $(du -h "$out" | cut -f1)"
+  else
+    echo "$(date) $a FAILED" >&2; failed=1
+  fi
+  # problems the collector reported (a repo it couldn't read, a file over a size limit, ...): the
+  # snapshot is kept, but say so (cron then alerts)
+  if [[ -s $errs ]]; then cat "$errs" >&2; failed=1; fi
+  ls -1 "$dir/$a"-*.tar.gz.gpg 2>/dev/null | sort -r | tail -n +8 | xargs -r rm -f || true
+done
+
+# 2. publish: an orphan commit with exactly the current files, force-pushed to work-snapshots
+if [[ ! -d $repo/.git ]]; then
+  git init -q "$repo"
+  git -C "$repo" config core.logAllRefUpdates false   # no reflog: old snapshots can be pruned at once
+fi
+cd "$repo"
+git remote get-url origin >/dev/null 2>&1 || git remote add origin "$url"
+git remote set-url origin "$url"
+# an empty backup repo: give it a default branch first, so work-snapshots never becomes the default
+# (plane-offsite clones the default branch and commits on it)
+heads=$(git ls-remote --heads origin)
+if [[ -z $heads ]]; then
+  readme=$(printf 'Nori backups (encrypted). Plane dumps: plane/ on this branch. Work snapshots: branch work-snapshots.\n' | git hash-object -w --stdin)
+  tree=$(printf '100644 blob %s\tREADME.md\n' "$readme" | git mktree)
+  c=$(GIT_AUTHOR_NAME="nori backup" GIT_AUTHOR_EMAIL="nori-backup@localhost" GIT_COMMITTER_NAME="nori backup" \
+      GIT_COMMITTER_EMAIL="nori-backup@localhost" git commit-tree "$tree" -m "start the backup repo")
+  git push -q origin "$c:refs/heads/main"
+fi
+entries=""
+for f in "$dir"/*.tar.gz.gpg; do
+  [[ -f $f ]] || continue
+  b=$(basename "$f")
+  [[ " ${areas[*]-} " == *" ${b%%-*} "* ]] || continue   # only the areas that are backed up
+  if (( $(wc -c < "$f") > 95 * 1024 * 1024 )); then   # GitHub refuses files over 100 MB
+    msg="$(date) ${b%%-*}: $b is over 95 MB (GitHub limit), not pushed; kept only in $dir"
+    # tonight's alerts; an older one was reported on its night
+    if [[ $b == *-$day.tar.gz.gpg ]]; then echo "$msg" >&2; failed=1; else echo "$msg"; fi
+    continue
+  fi
+  entries+=$(printf '100644 blob %s\t%s' "$(git hash-object -w "$f")" "$b")$'\n'
+done
+if [[ -z $entries ]] && (( ${#areas[@]} )); then
+  echo "$(date) nothing to publish" >&2; exit 1
+fi
+# an area switched off is also taken off GitHub (e.g. it turned out to hold company code); with every area
+# off that is an empty work-snapshots
+(( ${#areas[@]} )) || echo "$(date) every area has AREA_<a>_WORK_BACKUP=false: work-snapshots is emptied on $BACKUP_REPO"
+# the force push below replaces work-snapshots: never do that to a branch that isn't ours
+default=$(git ls-remote --symref origin HEAD)
+if [[ $default == *$'ref: refs/heads/work-snapshots\tHEAD'* ]]; then
+  echo "$(date) NOT pushed: work-snapshots is the default branch of $BACKUP_REPO, so plane-offsite commits on it and" \
+       "the force push would wipe that. Fix: on GitHub, $BACKUP_REPO > Settings > General > Default branch: main" \
+       "(create a main branch first if there is none). Snapshots are kept in $dir." >&2
+  exit 1
+fi
+remote=$(git ls-remote origin refs/heads/work-snapshots | cut -f1)
+if [[ -n $remote && $remote != "$(git rev-parse -q --verify refs/heads/work-snapshots || true)" ]]; then
+  # not the commit this server pushed last (first run, or another server): look at its files first
+  git fetch -q --depth=1 origin refs/heads/work-snapshots
+  listing=$(git ls-tree FETCH_HEAD)
+  if [[ -n $listing ]] && grep -qvE $'^100644 blob [0-9a-f]+\t[^/]+\\.tar\\.gz\\.gpg$' <<<"$listing"; then
+    echo "$(date) NOT pushed: the branch work-snapshots of $BACKUP_REPO holds more than *.tar.gz.gpg snapshots," \
+         "so it isn't ours and the force push would delete it. Move that branch away (rename it on GitHub) and" \
+         "run work-offsite again. Snapshots are kept in $dir." >&2
+    exit 1
+  fi
+fi
+tree=$(printf '%s' "$entries" | git mktree)
+c=$(GIT_AUTHOR_NAME="nori backup" GIT_AUTHOR_EMAIL="nori-backup@localhost" GIT_COMMITTER_NAME="nori backup" \
+    GIT_COMMITTER_EMAIL="nori-backup@localhost" git commit-tree "$tree" -m "work snapshots $(date +%F)")
+git push -q -f origin "$c:refs/heads/work-snapshots"
+git update-ref refs/heads/work-snapshots "$c"
+git prune --expire=now   # drop last night's objects locally
+echo "$(date) offsite ok ($(git ls-tree --name-only "$c" | wc -l | tr -d ' ') files on work-snapshots)"
+exit "$failed"

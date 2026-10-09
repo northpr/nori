@@ -1,0 +1,82 @@
+#!/usr/bin/python3 -I
+"""ask-owner: put tap-to-answer buttons on a question in the the owner's chat (via the Ops bot).
+
+  ask-owner "Deploy now?" "A: yes, now" "B: tomorrow" ["C: …" …]     2-6 options
+
+Run as the area user from the main tmux session. Writes ~/.ask-owner/outbox/<id>.json and
+returns at once; the Ops bot (the admin user, reads it with sudo -u <area>) sends the buttons. The owner's tap is typed
+into this session as "[Owner tapped on Telegram] Q: … → <option>". Not for pool sessions (CLAUDE_POOL=1).
+"""
+import json
+import os
+import pwd
+import re
+import sys
+import time
+import uuid
+from pathlib import Path
+
+MAX_Q, MAX_OPT, MAX_PENDING = 300, 60, 20
+
+
+def clean(s, n):
+    s = re.sub(r"[\x00-\x1f\x7f-\x9f  ]+", " ", s)
+    return re.sub(r" +", " ", s).strip()[:n]
+
+
+def write_request(box, area, question, options):
+    out = box / "outbox"
+    out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if len(list(out.glob("*.json"))) >= MAX_PENDING:
+        sys.exit("ask-owner: too many unsent requests; is the Ops bot running?")
+    rid = uuid.uuid4().hex[:12]
+    req = {"id": rid, "area": area, "question": clean(question, MAX_Q),
+           "options": [clean(o, MAX_OPT) for o in options], "created": int(time.time())}
+    tmp = out / f".{rid}.tmp"
+    tmp.write_text(json.dumps(req, ensure_ascii=False))
+    tmp.chmod(0o600)
+    tmp.replace(out / f"{rid}.json")
+    return rid
+
+
+def main(argv):
+    if os.environ.get("CLAUDE_POOL") == "1":
+        sys.exit("ask-owner: not available in a pool session (no tmux to type the answer into). Ask in your normal reply.")
+    area = os.environ.get("NORI_AREA") or pwd.getpwuid(os.getuid()).pw_name
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,30}", area):
+        sys.exit(f"ask-owner: bad area name {area!r}; run as the area user or set NORI_AREA")
+    if len(argv) < 3 or len(argv) > 7:
+        sys.exit('usage: ask-owner "Question?" "A: option" "B: option" [up to 6 options]')
+    question, options = argv[0], argv[1:]
+    if not clean(question, MAX_Q) or not all(clean(o, MAX_OPT) for o in options):
+        sys.exit("ask-owner: question and options must not be empty")
+    write_request(Path.home() / ".ask-owner", area, question, options)
+    print("sent; the owner's answer will arrive as your next input")
+
+
+def selftest():
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        box = Path(d) / ".ask-owner"
+        rid = write_request(box, "main", "Deploy\nnow?\x1b[31m", ["A: yes", "B: no\r\nnope"])
+        req = json.loads((box / "outbox" / f"{rid}.json").read_text())
+        assert "\n" not in req["question"] and "\x1b" not in req["question"], req
+        assert req["options"] == ["A: yes", "B: no nope"] and req["area"] == "main", req
+        assert oct((box / "outbox" / f"{rid}.json").stat().st_mode & 0o777) == "0o600"
+        env = dict(os.environ, HOME=d, NORI_AREA="main", CLAUDE_POOL="1")
+        p = subprocess.run([sys.executable, "-I", __file__, "Q?", "A", "B"], env=env, capture_output=True, text=True)
+        assert p.returncode != 0 and "pool" in p.stderr, p
+        env["CLAUDE_POOL"] = "0"
+        p = subprocess.run([sys.executable, "-I", __file__, "Q?", "A: x", "B: y"], env=env, capture_output=True, text=True)
+        assert p.returncode == 0 and "sent;" in p.stdout and len(list((Path(d) / ".ask-owner/outbox").glob("*.json"))) == 2, p
+        p = subprocess.run([sys.executable, "-I", __file__, "Q?", "A"], env=env, capture_output=True, text=True)
+        assert p.returncode != 0 and "usage" in p.stderr
+    print("ask-owner selftest ok")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        selftest()
+    else:
+        main(sys.argv[1:])

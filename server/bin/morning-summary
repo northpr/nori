@@ -115,6 +115,8 @@ Rules: plain text only, a few emojis, no markdown (no **, no #, no tables), writ
 FACTS:
 $FACTS"
 
+# cron has no systemd EnvironmentFile: load the Claude token that set-token wrote
+[[ -r "$HOME/.config/nori/claude.env" ]] && { set -a; . "$HOME/.config/nori/claude.env"; set +a; }
 SUMMARY=""
 CLAUDE_START=$(date +%s)
 # Neutral cwd so no project CLAUDE.md is loaded; no tools, no MCP servers, no session saved.
