@@ -37,7 +37,7 @@ Difficulty: 🟢 easy (minutes) · 🟡 medium (half an hour) · 🔴 more work 
 ## Power-user
 | | Item | Why | Setting / habit | Difficulty |
 |---|---|---|---|---|
-| [ ] | A separate area per life (personal / work) | each area is its own Linux user: the work session can't read personal files and the other way round (Plane tickets, `nori.conf` and the profile are shared by all areas, see README "Safety model") | `AREAS="personal work"` | 🟡 |
+| [ ] | A separate area per life (personal / work) | each area is its own Linux user: the work session can't read personal files and the other way round (Plane tickets, `nori.conf` and the profile are shared by all areas, see `docs/security.md`) | `AREAS="personal work"` | 🟡 |
 | [ ] | GitHub comments ask first in work | reviews and comments under your name in company repos are public; approve each one | `AREA_work_ASK_BEFORE_GITHUB_COMMENTS=true` (`full` sets it) | 🟢 |
 | [ ] | Plane tickets | decisions live in tickets, not in a chat you scroll past; `/board`, `/peek`, a weekly review | `PLANE=true` (8 GB server) | 🔴 |
 | [ ] | Keep decisions in tickets | the ticket is the record: questions, answers, branch, PR, "Done:" summary | habit (with Plane) | 🟢 |

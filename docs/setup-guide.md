@@ -19,7 +19,7 @@ Time: about 1–2 hours the first time, most of it waiting for installs.
 ## Quick setup (`./nori up`) (beta, being tested)
 The start is just:
 ```
-git clone -b develop https://github.com/northpr/nori && cd nori && claude
+git clone https://github.com/northpr/nori && cd nori && claude
 ```
 Questions at any point? Ask Nori in that Claude window: it knows this guide.
 You need Claude Code; Nori does the rest in chat. On a Mac, the first `git` may show a popup asking to install Apple's developer tools: click Install (about 5 min, free), then run the command again.
