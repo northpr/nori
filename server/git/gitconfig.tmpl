@@ -1,0 +1,20 @@
+[user]
+	useConfigOnly = true
+[init]
+	defaultBranch = main
+[push]
+	default = simple
+[pull]
+	ff = only
+[core]
+	# shared read-only copy (same path for every user); the dispatcher there also runs each repo's own hooks
+	hooksPath = /opt/nori/server/git/hooks
+# git runs "!" helpers through the shell, so $HOME resolves for every user (admin and area users).
+[credential "https://github.com"]
+	helper =
+	helper = !$HOME/.local/bin/git-credential-ghmulti
+[credential "https://gist.github.com"]
+	helper =
+	helper = !$HOME/.local/bin/git-credential-ghmulti
+# Identity follows the GitHub owner of the repo remote, not the folder.
+{{GIT_INCLUDES}}

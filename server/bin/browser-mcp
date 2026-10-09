@@ -1,0 +1,8 @@
+#!/bin/bash
+# Playwright MCP for the Claude sessions: headless Chromium, fresh profile per session,
+# screenshots/downloads saved under ~/shots/<area>/ so they can be sent to the chat.
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}"   # installed by bootstrap.sh
+area="${NORI_AREA:-${CLAUDE_TMUX_SESSION#claude-}}"; area="${area:-misc}"
+out="$HOME/shots/$area"; mkdir -p "$out"
+exec npx -y @playwright/mcp@0.0.82 --headless --isolated --browser chromium --output-dir "$out"

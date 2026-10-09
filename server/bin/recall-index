@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Build/refresh the recall search index (~/recall/recall.db). Run from cron every 15 min.
+
+Indexes only human-readable text, never tool output:
+  - chat:    the Claude session's transcripts on this server (owner messages, Claude's text and
+             chat replies), area from the session cwd (~/projects/<area>)
+  - plane:   (only when PLANE=true) ticket titles/descriptions and comments; the area of a Plane
+             project comes from AREA_<area>_PLANE_PROJECTS="ID1,ID2" in nori.conf, else "general"
+  - handoff: ~/projects/<area>/HANDOFF.md
+Secrets are redacted before storing. Records older than 180 days are pruned.
+Chats from your laptop are deliberately NOT included.
+"""
+import html
+import json
+import re
+import os
+import sqlite3
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+HOME = Path.home()
+
+def load_conf():
+    """Read nori.conf (plain KEY="value" lines; this script runs with python -I, so no imports from nori/),
+    then generated/nori.resolved.conf, which holds the flags with the PRESET defaults applied."""
+    root = Path(os.environ.get("NORI_ROOT", Path.home() / "nori"))
+    pat = r'^([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|\'([^\']*)\'|(\S*))'
+    conf = {}
+    for f in (Path(os.environ.get("NORI_CONF", root / "nori.conf")), root / "generated" / "nori.resolved.conf"):
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        conf.update({m.group(1): next((g for g in m.groups()[1:] if g is not None), "") for m in re.finditer(pat, text, re.M)})
+    return conf
+
+
+CONF = load_conf()
+AREAS = tuple(CONF.get("AREAS", "main").split())
+DB = HOME / "recall" / "recall.db"
+KEEP_DAYS = 180
+MAXLEN = 2000
+PLANE_BASE = f"http://{CONF.get('TAILNET_HOST', '')}/api/v1/workspaces/{CONF.get('PLANE_WORKSPACE', 'main')}"
+PLANE_AREA = {p.strip().upper(): a for a in AREAS for p in CONF.get(f"AREA_{a}_PLANE_PROJECTS", "").split(",") if p.strip()}
+
+SECRET_RES = [
+    re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{30,}\b"),                    # telegram bot tokens
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\bplane_api_[A-Za-z0-9]{16,}\b"),
+    re.compile(r"(?i)\b(token|password|passwd|secret|api[_-]?key|key)\s*[=:]\s*\S{12,}"),
+    re.compile(r"-----BEGIN [A-Z ]*KEY-----.*?-----END [A-Z ]*KEY-----", re.S),
+    re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"),                         # long base64/hex blobs
+]
+CHANNEL_RE = re.compile(r"<channel [^>]*>\s*(.*?)\s*</channel>", re.S)
+
+
+def redact(t):
+    for r in SECRET_RES:
+        t = r.sub("[redacted]", t)
+    return t
+
+
+def db():
+    DB.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(DB)
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS rec(id TEXT PRIMARY KEY, source TEXT, area TEXT, project TEXT, ts REAL, role TEXT, text TEXT);
+    CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(text, content='rec', content_rowid='rowid', tokenize='trigram');
+    CREATE TRIGGER IF NOT EXISTS rec_ai AFTER INSERT ON rec BEGIN INSERT INTO fts(rowid, text) VALUES (new.rowid, new.text); END;
+    CREATE TRIGGER IF NOT EXISTS rec_ad AFTER DELETE ON rec BEGIN INSERT INTO fts(fts, rowid, text) VALUES('delete', old.rowid, old.text); END;
+    CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+    """)
+    return c
+
+
+def put(c, rid, source, area, project, ts, role, text):
+    text = redact(text.strip())[:MAXLEN]
+    if len(text) < 3:
+        return
+    c.execute("DELETE FROM rec WHERE id=?", (rid,))
+    c.execute("INSERT INTO rec(id,source,area,project,ts,role,text) VALUES(?,?,?,?,?,?,?)",
+              (rid, source, area, project, ts, role, text))
+
+
+def meta_get(c, k, default=""):
+    r = c.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+    return r[0] if r else default
+
+
+def meta_set(c, k, v):
+    c.execute("INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", (k, str(v)))
+
+
+def iso_ts(s):
+    try:
+        return time.mktime(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+    except (TypeError, ValueError):
+        return time.time()
+
+
+# ---------- transcripts ----------
+def area_of(cwd):
+    for a in AREAS:
+        if f"/projects/{a}" in (cwd or ""):
+            return a
+    return "general"
+
+
+def project_of(cwd):
+    parts = (cwd or "").split("/projects/", 1)
+    if len(parts) < 2:
+        return "server"
+    p = parts[1].split("/")
+    return "/".join(p[1:3]) if len(p) > 1 else p[0]
+
+
+def index_transcripts(c):
+    root = HOME / ".claude" / "projects"
+    for f in sorted(root.glob("*/*.jsonl")):
+        if f.parent.name.startswith("-tmp"):
+            continue  # headless helper runs (digest, triage)
+        st = f.stat()
+        key = f"tx:{f}"
+        if meta_get(c, key) == f"{st.st_mtime}:{st.st_size}":
+            continue
+        for n, line in enumerate(f.open(errors="ignore")):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") not in ("user", "assistant"):
+                continue
+            msg = e.get("message") or {}
+            content = msg.get("content")
+            cwd = e.get("cwd")
+            texts = []
+            if isinstance(content, str):
+                texts.append(("owner" if e["type"] == "user" else "claude", content))
+            elif isinstance(content, list):
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "text":
+                        texts.append(("owner" if e["type"] == "user" else "claude", b.get("text", "")))
+                    elif b.get("type") == "tool_use" and str(b.get("name", "")).endswith("reply"):
+                        texts.append(("claude→chat", (b.get("input") or {}).get("text", "")))
+            for i, (role, t) in enumerate(texts):
+                m = CHANNEL_RE.findall(t)
+                if role == "owner":
+                    if not m:
+                        continue  # skip system/internal user turns; keep only real owner messages
+                    t = "\n".join(m)
+                put(c, f"{f.stem}:{n}:{i}", "chat", area_of(cwd), project_of(cwd),
+                    iso_ts(e.get("timestamp")), role, t)
+        meta_set(c, key, f"{st.st_mtime}:{st.st_size}")
+        c.commit()
+
+
+# ---------- plane ----------
+def plane(path):
+    key = ""
+    env = HOME / ".plane-mcp.env"
+    for line in env.read_text().splitlines():
+        if line.startswith("PLANE_API_KEY="):
+            key = line.split("=", 1)[1].strip()
+    for attempt in range(4):
+        req = urllib.request.Request(PLANE_BASE + path, headers={"X-API-Key": key})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                time.sleep(1.2)  # stay under ~60 req/min
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 3:
+                time.sleep(20)
+                continue
+            raise
+
+
+def strip_html(s):
+    return html.unescape(re.sub(r"<[^>]+>", " ", s or "")).strip()
+
+
+def index_plane(c):
+    if CONF.get("PLANE") != "true" or not (HOME / ".plane-mcp.env").exists():
+        return
+    for p in plane("/projects/").get("results", []):
+        ident, pid = p["identifier"], p["id"]
+        area = PLANE_AREA.get(ident, "general")
+        for it in plane(f"/projects/{pid}/work-items/?expand=state&per_page=100").get("results", []):
+            key = f"plane:{it['id']}"
+            if meta_get(c, key) == (it.get("updated_at") or ""):
+                continue
+            tid = f"{ident}-{it.get('sequence_id')}"
+            state = (it.get("state") or {}).get("name", "") if isinstance(it.get("state"), dict) else ""
+            put(c, f"{key}:item", "plane", area, tid, iso_ts(it.get("updated_at")), "ticket",
+                f"{tid} [{state}] {it.get('name', '')}\n{strip_html(it.get('description_html'))}")
+            for cm in plane(f"/projects/{pid}/work-items/{it['id']}/comments/").get("results", []):
+                put(c, f"plane:c:{cm['id']}", "plane", area, tid, iso_ts(cm.get("created_at")), "comment",
+                    f"{tid} comment: {strip_html(cm.get('comment_html'))}")
+            meta_set(c, key, it.get("updated_at") or "")
+            c.commit()
+
+
+# ---------- handoff notes ----------
+def index_handoff(c):
+    for area in AREAS:
+        f = HOME / "projects" / area / "HANDOFF.md"
+        if f.exists():
+            put(c, f"handoff:{area}", "handoff", area, "HANDOFF.md", f.stat().st_mtime, "note", f.read_text())
+
+
+def main():
+    c = db()
+    t0 = time.time()
+    index_transcripts(c)
+    index_handoff(c)
+    try:
+        index_plane(c)
+    except Exception as e:
+        print(f"plane skipped: {e}")
+    c.execute("DELETE FROM rec WHERE ts < ?", (time.time() - KEEP_DAYS * 86400,))
+    c.commit()
+    n = c.execute("SELECT source, area, count(*) FROM rec GROUP BY 1,2").fetchall()
+    print(f"{time.strftime('%F %T')} indexed in {time.time() - t0:.1f}s: " + ", ".join(f"{s}/{a}={k}" for s, a, k in n))
+
+
+if __name__ == "__main__":
+    main()

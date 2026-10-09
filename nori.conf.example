@@ -1,0 +1,91 @@
+# Nori config. Copy to nori.conf (gitignored) and edit:   cp nori.conf.example nori.conf
+# It is plain bash (KEY="value"), read by setup.sh, bootstrap.sh and the helper scripts.
+# NO SECRETS HERE. Bot tokens and API keys stay in files on the server (see docs/setup-guide.md).
+# Booleans are exactly true or false.
+
+# ---------------------------------------------------------------- basics
+OWNER_NAME="Alex"                 # your first name; used in the rules Claude follows
+SERVER_NAME="nori-server"         # hostname, Tailscale machine name and Remote Control name prefix
+TIMEZONE="UTC"                    # e.g. Europe/Berlin, Asia/Bangkok (cron times use it)
+LANGUAGES="English"               # languages you write in, e.g. "English and German"
+ADMIN_USER="admin"                # Linux user with sudo: runs the Ops bot, cron, setup.sh
+
+# ---------------------------------------------------------------- chat
+CHAT="telegram"                   # only "telegram" works today (see chat/discord, chat/slack)
+CHAT_ALLOWED_IDS="123456789"      # your numeric chat user id(s), comma separated. Telegram: message
+                                  # @userinfobot, or send /whoami to your Ops bot once it runs.
+
+# ---------------------------------------------------------------- areas
+# One area = one always-on Claude session = one Linux user = one bot. Start with one.
+# Names: lowercase letters/digits, start with a letter (they become Linux user names).
+# A second area (e.g. "work" next to "personal") is optional; see docs/setup-guide.md.
+AREAS="main"
+AREA_main_PREFIX="m"              # in a group chat, "m: do X" reaches this session
+AREA_main_DESCRIPTION="all my projects"
+AREA_main_BOT="@your_nori_bot"    # label only, so the rules can name the bot (create it in BotFather)
+# Optional per area:
+# AREA_main_ASK_BEFORE_GITHUB_COMMENTS=false
+#   true: posting on GitHub (gh pr review / pr comment / issue comment / pr edit / pr close) asks
+#   you first in this area. Turn it on for an area that works in shared or company repos: teammates
+#   see those comments and reviews under your name, so a wrong one is public and hard to take back.
+# AREA_main_PLANE_PROJECTS="APP,WEB"
+#   (with PLANE=true) Plane project identifiers that belong to this area: used by recall and by
+#   the Ops bot's `/board <area>`. Unmapped projects count for the first area.
+
+# ---------------------------------------------------------------- git identity
+# One line per GitHub owner (user or org): owner|name for commits|commit email|gh login
+# The last field is optional (defaults to the owner); use it when an org's repos are
+# pushed by your personal login. Identity follows the repo's remote owner, and a
+# pre-commit guard blocks a mismatched author. Leave empty to skip.
+GITHUB_ACCOUNTS="
+your-github-name|Your Name|you@example.com
+"
+
+# ================================================================ preset
+# One switch for the feature set. Pick one, then override single flags below if you like
+# (a flag you set always wins over the preset). Table: docs/setup-guide.md, "Presets".
+#   starter      one Claude + one chat bot. No Ops bot, no pool, no Plane/previews/browser.
+#                Nightly handoff + git identity guard on. Smallest, easiest start (4 GB server is plenty).
+#   recommended  starter + the Ops bot (/status /progress /restart /ask, alerts, daily digest),
+#                pool sessions (4 per area), browser, previews, recall.
+#   full         recommended + Plane tickets (/board /peek, ticket intake, weekly review), off-site
+#                Plane backups (once PLANE_BACKUP_REPO is set), 8 pool sessions, and GitHub comments
+#                ask first in every area after the first (e.g. "work"). Use an 8 GB server.
+PRESET="recommended"
+
+# ================================================================ settings that are always yours
+OPS_GROUP_NAME="Nori HQ"          # label for the group chat the Ops bot posts into
+HANDOFF_TIME="03:45"              # local time (24h HH:MM); the digest and updates avoid this window
+DIGEST_TIME="08:00"
+DIGEST_LANGUAGE="English"
+REMOTE_CONTROL=true               # also reachable from the Claude app (Remote Control)
+AUTO_UPDATES=true                 # unattended security updates (bootstrap.sh)
+AUTO_REBOOT_TIME="04:30"          # reboot window for updates; keep it after HANDOFF_TIME
+EXTRA_ASK_PERMISSIONS=""          # extra commands that always ask first, e.g. "railway fly vercel"
+                                  # (git push and gh pr merge always ask)
+PLANE_WORKSPACE="main"            # Plane workspace slug you create on first login (with PLANE=true)
+PLANE_BACKUP_REPO=""              # e.g. your-github-name/nori-backups (private, create it yourself)
+PREVIEW_PORT_START=8100           # each area gets a block of 50 ports from here
+
+# ================================================================ overrides (optional)
+# Uncomment a line to override the preset. Values shown are what "recommended" uses.
+# OPS_BOT=true                    # separate small bot: /status, /restart, /progress, alerts. false = one
+#                                 # chat bot only: no alerts, no /ask; the digest and nightly report come
+#                                 # through your area bot in your DM
+# OPS_ASK=true                    # Ops bot `/ask <question>`: Claude (Sonnet, no tools) answers from
+#                                 # read-only facts the bot collects (status, logs, journals, docs)
+# DIGEST=true                     # daily repo digest (Ops chat, or your DM without the Ops bot)
+# HANDOFF=true                    # nightly handoff note + fresh restart of idle sessions
+# POOL_SESSIONS=true              # session pool per area: start extra Claude sessions from the Claude
+#                                 # app / claude.ai/code (no chat bot). Needs a one-time Remote Control
+#                                 # consent per area user, see docs/setup-guide.md step 5.
+# POOL_CAPACITY=4                 # max pool sessions at once per area (each uses RAM; 4 GB box: 2-4)
+# PREVIEWS=true                   # `preview start`: try an app on your phone via Tailscale only
+# RECALL=true                     # `recall "words"` search over past chats and handoffs
+# BROWSER=true                    # headless browser MCP (Playwright + Chromium) for screenshots
+# PLANE=false                     # self-hosted Plane tickets (docker), plane-mcp, ticket rules, ticket intake
+# PLANE_OFFSITE_BACKUP=false      # encrypted nightly Plane dump pushed to PLANE_BACKUP_REPO
+
+# Filled in automatically by setup.sh once Tailscale is up (the machine's MagicDNS name,
+# e.g. nori-server.tail1234.ts.net). Used for preview and Plane links.
+TAILNET_HOST=""

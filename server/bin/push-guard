@@ -1,0 +1,49 @@
+#!/usr/bin/python3 -I
+# PreToolUse hook for Bash: makes git pushes and PR merges ask the owner, however the command is spelled
+# (git -C repo push, cd x && git push, gh api -X PUT .../merge). Reads the hook JSON on stdin.
+# It over-matches on purpose (asking is the safe side). `push-guard --selftest` runs built-in cases.
+# A script that pushes internally is not inspected.
+import json
+import re
+import sys
+
+GIT_PUSH = re.compile(r"\bgit\b[^;&|\n]*\bpush\b")
+GH_MERGE = re.compile(r"\bgh\s+pr\s+merge\b")
+GH_API = re.compile(r"\bgh\s+api\b")
+API_RISKY = re.compile(r"/merge\b|mergePullRequest|(?:-X|--method)[\s=]*(?:PUT|PATCH|POST|DELETE)\b", re.I)
+
+ASK = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+                              "permissionDecisionReason": "push/merge: owner approves"}}
+
+
+def needs_ask(cmd):
+    if GIT_PUSH.search(cmd) or GH_MERGE.search(cmd):
+        return True
+    return any(GH_API.search(seg) and API_RISKY.search(seg) for seg in re.split(r"[;&|\n]", cmd))
+
+
+def selftest():
+    ask = ["git push", "git -C x push origin main", "cd a && git push", "gh api -X PUT repos/o/r/pulls/1/merge",
+           "gh pr merge 3", "gh api --method=DELETE repos/o/r/git/refs/heads/x", "git push; echo ok",
+           "gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'"]
+    allow = ["git status", "git log --oneline", "gh pr list", "gh api repos/o/r/pulls"]
+    bad = [c for c in ask if not needs_ask(c)] + [c for c in allow if needs_ask(c)]
+    for c in bad:
+        print("selftest FAIL:", c)
+    print("selftest ok" if not bad else "selftest failed")
+    return 1 if bad else 0
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+        return selftest()
+    try:
+        cmd = json.load(sys.stdin).get("tool_input", {}).get("command", "")
+    except Exception:
+        return 0
+    if isinstance(cmd, str) and needs_ask(cmd):
+        print(json.dumps(ASK))
+    return 0
+
+
+sys.exit(main())

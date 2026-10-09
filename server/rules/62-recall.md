@@ -1,0 +1,2 @@
+## Recall (search past work)
+`recall "words"` searches past chats and handoff notes (last 180 days; your area by default; `--area all`, `--source chat|plane|handoff`, `--limit N`). Use it when {{OWNER_NAME}} refers to something from before ("what did we decide about...", "like last time") or after a fresh start, instead of guessing or re-reading repos. It returns short snippets; open the repo only if needed.

@@ -1,0 +1,9 @@
+#!/bin/bash
+# Launch the Plane MCP server (stdio) with the token from ~/.plane-mcp.env (PLANE_API_KEY=...).
+# shellcheck disable=SC1091
+. "$HOME/nori/scripts/conf.sh" || exit 1
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+set -a; . "$HOME/.plane-mcp.env"; set +a
+export PLANE_WORKSPACE_SLUG="$PLANE_WORKSPACE"
+export PLANE_BASE_URL="http://$TAILNET_HOST"
+exec uvx plane-mcp-server==0.3.3 stdio

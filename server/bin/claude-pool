@@ -1,0 +1,23 @@
+#!/bin/bash
+# Session pool for one area: start as many Claude sessions as you like (up to POOL_CAPACITY) from the
+# Claude app or claude.ai/code (pick "<area>-…" on this server → New session). Run by claude-pool@<area>.service.
+# Pool sessions have NO chat bot: their chat state dir has no token, so the plugin can't start a
+# second bot (which would knock out the area's always-on chat session).
+# Once per area user, run `claude remote-control` interactively and answer "Enable Remote Control? y",
+# then Ctrl+C (see docs/setup-guide.md section 5).
+set -euo pipefail
+inst="${1:?usage: claude-pool <area>}"
+export PATH="$HOME/.local/bin:$HOME/.local/go/bin:$HOME/go/bin:/usr/local/bin:/usr/bin:/bin"
+# shellcheck disable=SC1091
+. "$HOME/nori/scripts/conf.sh"
+# shellcheck disable=SC1090
+. "$NORI_ROOT/chat/$CHAT/platform.conf"
+case " $AREAS " in *" $inst "*) ;; *) echo "claude-pool: unknown area $inst (AREAS=\"$AREAS\")" >&2; exit 2 ;; esac
+export "$CHAT_STATE_ENV=$HOME/.claude/channels/pool-no-chat"   # empty on purpose: no token, no bot
+mkdir -p "$HOME/.claude/channels/pool-no-chat"
+export NORI_AREA="$inst"                                       # which area this is (recall, preview, browser-mcp)
+export CLAUDE_POOL=1                                           # the rules tell pool sessions apart by this
+export CLAUDE_CODE_SUBAGENT_MODEL=sonnet
+cd "$HOME/projects/$inst"
+exec claude remote-control --spawn same-dir --capacity "$POOL_CAPACITY" --no-create-session-in-dir \
+  --permission-mode auto --remote-control-session-name-prefix "$inst-"

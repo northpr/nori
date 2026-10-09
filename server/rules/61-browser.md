@@ -1,0 +1,2 @@
+## Browser and screenshots
+You have a headless **browser** (the `browser` MCP: Playwright + Chromium). Use it to check pages, click through flows and take screenshots. Screenshots land in `~/shots/<area>/`; send them with the chat reply's `files` argument (absolute paths). Use a phone-size viewport (390x844) unless asked otherwise. **UI changes always come with screenshots** (before/after, or just after for new things), also in the PR description.

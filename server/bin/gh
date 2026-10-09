@@ -1,0 +1,12 @@
+#!/bin/bash
+# gh wrapper: pick the GitHub account from the current repo remote owner.
+real=/usr/bin/gh
+if [ -z "$GH_TOKEN" ] && url=$(git remote get-url origin 2>/dev/null); then
+  owner=$(echo "$url" | sed -E "s#^(https://github.com/|git@github.com:)([^/]+)/.*#\2#")
+  acct=$(awk -v o="$owner" "\$1==o{print \$2}" ~/.config/gh-accounts)
+  if [ -n "$acct" ]; then
+    tok=$("$real" auth token --user "$acct" 2>/dev/null) || { echo "gh-wrapper: account $acct (owner $owner) is not logged in. Run: gh auth login" >&2; exit 1; }
+    export GH_TOKEN="$tok"
+  fi
+fi
+exec "$real" "$@"

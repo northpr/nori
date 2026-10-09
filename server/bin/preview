@@ -1,0 +1,42 @@
+#!/bin/bash
+# Run an app on the server and get a link the owner can open on their phone (Tailscale only).
+#   preview start <name> [port] -- <command...>   run <command> in the current dir (port also in $PORT)
+#   preview list | preview stop <name> | preview logs <name>
+# Ports: each area gets a block of 50 from PREVIEW_PORT_START (nori.conf), in AREAS order. They are
+# reachable over Tailscale only (ufw allows the tailscale0 interface, the public IP stays closed).
+# Previews stop by themselves after 24h. The app must listen on 0.0.0.0 (or the Tailscale IP) at $PORT.
+set -euo pipefail
+# shellcheck disable=SC1091
+. "$HOME/nori/scripts/conf.sh"
+HOST="${TAILNET_HOST:?TAILNET_HOST is empty in nori.conf (run setup.sh once Tailscale is up)}"
+area="${NORI_AREA:-${CLAUDE_TMUX_SESSION:-}}"; area="${area#claude-}"
+[[ -n $area ]] || area=$(id -un)   # each area runs as its own Linux user; unknown names fall back to the first block
+idx=0; n=0
+for a in $AREAS; do [[ $a == "$area" ]] && idx=$n; n=$((n + 1)); done
+base=$((PREVIEW_PORT_START + idx * 50)); top=$((PREVIEW_PORT_START + n * 50 - 1))
+cmd="${1:-list}"; shift || true
+case "$cmd" in
+  start)
+    name="$1"; shift
+    port=""; [[ ${1:-} =~ ^[0-9]+$ ]] && { port="$1"; shift; }
+    [[ ${1:-} == -- ]] && shift
+    [[ $# -gt 0 ]] || { echo "usage: preview start <name> [port] -- <command...>"; exit 2; }
+    if [[ -z $port ]]; then
+      for p in $(seq $base $((base + 49))); do ss -ltn "sport = :$p" | grep -q LISTEN || { port=$p; break; }; done
+    fi
+    (( port >= PREVIEW_PORT_START && port <= top )) || { echo "port must be $PREVIEW_PORT_START-$top"; exit 2; }
+    systemctl --user stop "preview-$name" 2>/dev/null || true
+    systemd-run --user --quiet --unit "preview-$name" --property RuntimeMaxSec=86400 \
+      --working-directory "$PWD" --setenv PORT="$port" --setenv HOST=0.0.0.0 \
+      --setenv PATH="$PWD/.venv/bin:$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin" \
+      /bin/bash -c "$*"
+    for _ in $(seq 1 30); do ss -ltn "sport = :$port" | grep -q LISTEN && break; sleep 1; done
+    if ss -ltn "sport = :$port" | grep -q LISTEN; then echo "✅ http://$HOST:$port  (preview-$name, stops in 24h)"
+    else echo "⚠️ preview-$name started but nothing listens on :$port yet. Check: preview logs $name"; fi ;;
+  list)
+    systemctl --user list-units 'preview-*' --no-legend --plain | awk '{print $1, $3, $4}' || true
+    ss -ltn | awk '{print $4}' | awk -v lo="$PREVIEW_PORT_START" -v hi="$top" -F: '$NF >= lo && $NF <= hi {print ":" $NF}' | sort -u | sed "s#:#  listening → http://$HOST:#" ;;
+  stop) systemctl --user stop "preview-$1" && echo "stopped preview-$1" ;;
+  logs) journalctl --user -u "preview-$1" -n "${2:-40}" --no-pager -o cat ;;
+  *) sed -n '2,7p' "$0" ;;
+esac

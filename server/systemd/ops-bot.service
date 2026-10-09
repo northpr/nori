@@ -1,0 +1,12 @@
+[Unit]
+Description=Ops chat bot (status, restarts, alerts; not Claude)
+After=network-online.target
+ConditionPathExists=%h/.ops-bot.env
+
+[Service]
+ExecStart=/usr/bin/python3 -I %h/.local/bin/ops-bot serve
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

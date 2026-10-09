@@ -1,0 +1,11 @@
+name: Idea or feature
+description: Something that would make Nori easier or better
+labels: [idea]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: The problem it solves first, then your idea.
+    validations:
+      required: true

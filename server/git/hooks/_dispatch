@@ -1,0 +1,19 @@
+#!/bin/bash
+# Global hook dispatcher (core.hooksPath points here). Every standard hook name is a symlink to this file.
+# Runs the identity guard first for pre-commit, then the repo's own hook of the same name, so repos that
+# rely on their own hooks (.git/hooks, husky via a local core.hooksPath) keep working.
+name=$(basename "$0")
+here=$(dirname "$(readlink -f "$0")")
+if [ "$name" = pre-commit ]; then
+  "$here/../pre-commit" "$@" || exit $?
+fi
+dir=$(git config --local --get core.hooksPath 2>/dev/null)
+if [ -n "$dir" ]; then
+  case $dir in "~/"*) dir="$HOME/${dir#\~/}" ;; /*) ;; *) dir="$(git rev-parse --show-toplevel)/$dir" ;; esac
+else
+  dir=$(git rev-parse --git-common-dir)/hooks   # not --git-path: that would honour our own core.hooksPath
+  case $dir in /*) ;; *) dir="$(pwd)/$dir" ;; esac
+fi
+[ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$(cd "$here" && pwd -P)" ] && exit 0
+[ -x "$dir/$name" ] && exec "$dir/$name" "$@"
+exit 0

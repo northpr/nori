@@ -1,0 +1,20 @@
+#!/bin/bash
+# Start one always-on Claude session. Usage: claude-session <area>
+# Run by systemd (claude@<area>.service) inside tmux session claude-<area>.
+set -euo pipefail
+inst="${1:?usage: claude-session <area>}"
+export PATH="$HOME/.local/bin:$HOME/.local/go/bin:$HOME/go/bin:/usr/local/bin:/usr/bin:/bin"   # + per-user toolchains like Go
+# shellcheck disable=SC1091
+. "$HOME/nori/scripts/conf.sh"
+# shellcheck disable=SC1090
+. "$NORI_ROOT/chat/$CHAT/platform.conf"
+case " $AREAS " in *" $inst "*) ;; *) echo "claude-session: unknown area $inst (AREAS=\"$AREAS\")" >&2; exit 2 ;; esac
+export NORI_AREA="$inst"                                       # which area this is (recall, preview, browser-mcp)
+export CLAUDE_TMUX_SESSION="claude-$inst"                      # used by cc-slash
+export "$CHAT_STATE_ENV=$HOME/.claude/channels/${CHAT_STATE_PREFIX}${inst}"   # bot token + allowlist per area
+export CLAUDE_CODE_SUBAGENT_MODEL=sonnet                       # main session stays on the big model; subagents code on Sonnet
+mkdir -p "$HOME/projects/$inst"
+cd "$HOME/projects/$inst"
+args=(--channels "plugin:$CHAT_PLUGIN")
+is_on REMOTE_CONTROL && args+=(--remote-control "$SERVER_NAME-$inst")
+exec claude "${args[@]}"

@@ -1,0 +1,20 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests (syntax, render presets, no owner data, ops-bot helpers)
+        run: tests/run.sh
+      - name: shellcheck (errors only)
+        run: |
+          files=$(grep -rlE '^#!.*\b(ba)?sh\b' --exclude-dir=.git . || true)
+          # shellcheck exits non-zero only for error-level findings with -S error
+          shellcheck -S error $files

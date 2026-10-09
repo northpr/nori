@@ -1,0 +1,12 @@
+#!/bin/bash
+# Attach to a Claude session's tmux: attach [area]   (detach: Ctrl+b then d, never /exit)
+# Each session runs as its own Linux user (named after the area); the admin attaches via sudo.
+# Restart a session without the Ops bot: sudo -u <area> XDG_RUNTIME_DIR=/run/user/$(id -u <area>) systemctl --user restart claude@<area>
+# shellcheck disable=SC1091
+. "$HOME/nori/scripts/conf.sh" 2>/dev/null || AREAS="main"
+a="${1:-${AREAS%% *}}"
+infocmp "$TERM" >/dev/null 2>&1 || export TERM=xterm-256color
+if [[ $(id -un) == "$a" ]]; then exec tmux -L "claude-$a" attach -t "claude-$a"; fi
+# the area user may not see the admin's ~/.terminfo: check as that user too
+sudo -u "$a" -H env TERM="$TERM" infocmp >/dev/null 2>&1 || export TERM=xterm-256color
+exec sudo -u "$a" -H env TERM="$TERM" tmux -L "claude-$a" attach -t "claude-$a"

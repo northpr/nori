@@ -1,0 +1,16 @@
+[Unit]
+Description=Always-on Claude Code session %i (tmux: claude-%i)
+After=network-online.target
+# Only areas whose chat bot token exists get a session.
+ConditionPathExists=%h/.claude/channels/{{CHAT_STATE_PREFIX}}%i/.env
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/tmux -L claude-%i new-session -d -s claude-%i -x 220 -y 50 %h/.local/bin/claude-session %i
+ExecStop=/usr/bin/tmux -L claude-%i kill-session -t claude-%i
+# tmux exits 0 when Claude dies, so on-failure would never restart it; systemctl stop is still honoured
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

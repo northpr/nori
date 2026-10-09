@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Search past chats, Plane tickets/comments and handoff notes.
+
+  recall "query" [--area <area>|all] [--source chat|plane|handoff] [--limit 5] [--days N]
+
+Default area: an area's own session sees its area + general; anything else (the admin user, e.g.
+over ssh) asks every area user's own index and prints all of them.
+Only returns short snippets; nothing is loaded into a session unless it runs this.
+"""
+import argparse
+import getpass
+import os
+import pwd
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def load_conf():
+    """Read nori.conf (plain KEY="value" lines; this script runs with python -I, so no imports from nori/),
+    then generated/nori.resolved.conf, which holds the flags with the PRESET defaults applied."""
+    root = Path(os.environ.get("NORI_ROOT", Path.home() / "nori"))
+    pat = r'^([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|\'([^\']*)\'|(\S*))'
+    conf = {}
+    for f in (Path(os.environ.get("NORI_CONF", root / "nori.conf")), root / "generated" / "nori.resolved.conf"):
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        conf.update({m.group(1): next((g for g in m.groups()[1:] if g is not None), "") for m in re.finditer(pat, text, re.M)})
+    return conf
+
+
+CONF = load_conf()
+AREAS = tuple(CONF.get("AREAS", "main").split())
+
+DB = Path.home() / "recall" / "recall.db"
+
+ap = argparse.ArgumentParser()
+ap.add_argument("query", nargs="+")
+ap.add_argument("--area", choices=[*AREAS, "all"])
+ap.add_argument("--source", choices=["chat", "plane", "handoff"])
+ap.add_argument("--limit", type=int, default=5)
+ap.add_argument("--days", type=int, default=180)
+a = ap.parse_args()
+q = " ".join(a.query).strip()
+
+# Run as the admin (e.g. over ssh): ask each area user's own index and print all of them.
+if getpass.getuser() not in AREAS:
+    want = list(AREAS) if (a.area or "all") == "all" else [a.area]
+    for u in want:
+        extra = (["--source", a.source] if a.source else []) + ["--limit", str(a.limit), "--days", str(a.days)]
+        r = subprocess.run(["sudo", "-n", "-u", u, "-H", f"{pwd.getpwnam(u).pw_dir}/.local/bin/recall", q, "--area", u, *extra],
+                           capture_output=True, text=True)
+        print(f"── {u} ──\n{(r.stdout or r.stderr).strip()}\n")
+    sys.exit(0)
+
+if not DB.exists():
+    sys.exit("recall: no index yet (recall-index runs every 15 min)")
+
+# own area: NORI_AREA (chat and pool sessions), else the chat session's tmux name, else the Linux user (one per area)
+sess = os.environ.get("CLAUDE_TMUX_SESSION", "")
+own = os.environ.get("NORI_AREA") or (sess[len("claude-"):] if sess.startswith("claude-") else "") or getpass.getuser()
+area = a.area or (own if own in AREAS else "all")
+areas = [*AREAS, "general"] if area == "all" else [area, "general"]
+
+c = sqlite3.connect(DB)
+where = [f"r.area IN ({','.join('?' * len(areas))})", "r.ts >= ?"]
+params = [*areas, time.time() - a.days * 86400]
+if a.source:
+    where.append("r.source = ?")
+    params.append(a.source)
+
+terms = [t for t in re.split(r"\s+", q) if t]
+long_terms = [t for t in terms if len(t) >= 3]
+if long_terms:
+    # trigram FTS: every word must appear (works for Thai too, since it matches substrings)
+    match = " AND ".join('"' + t.replace('"', '""') + '"' for t in long_terms)
+    sql = f"""SELECT r.source, r.area, r.project, r.ts, r.role, r.text FROM fts JOIN rec r ON r.rowid = fts.rowid
+              WHERE fts MATCH ? AND {' AND '.join(where)} ORDER BY bm25(fts), r.ts DESC LIMIT ?"""
+    rows = c.execute(sql, [match, *params, a.limit]).fetchall()
+else:
+    sql = f"""SELECT r.source, r.area, r.project, r.ts, r.role, r.text FROM rec r
+              WHERE r.text LIKE ? AND {' AND '.join(where)} ORDER BY r.ts DESC LIMIT ?"""
+    rows = c.execute(sql, [f"%{q}%", *params, a.limit]).fetchall()
+
+if not rows:
+    print(f"no matches for “{q}” (area: {area})")
+    sys.exit(0)
+
+key = (long_terms or terms or [q])[0].lower()
+for src, ar, proj, ts, role, text in rows:
+    flat = re.sub(r"\s+", " ", text)
+    i = flat.lower().find(key)
+    start = max(0, i - 100) if i >= 0 else 0
+    snip = ("…" if start else "") + flat[start:start + 250] + ("…" if len(flat) > start + 250 else "")
+    print(f"[{src} · {ar} · {proj} · {time.strftime('%Y-%m-%d', time.localtime(ts))} · {role}] {snip}\n")

@@ -1,0 +1,20 @@
+#!/bin/bash
+# After the nightly Plane dump: encrypt it (gpg AES256, passphrase in ~/.backup-pass; keep a copy of
+# that passphrase OFF the server, e.g. in your password manager) and push it to your private backup
+# repo (PLANE_BACKUP_REPO in nori.conf). Keeps the newest 30 encrypted dumps in the tree.
+set -euo pipefail
+# shellcheck disable=SC1091
+. "$HOME/nori/scripts/conf.sh"
+[[ -n $PLANE_BACKUP_REPO ]] || { echo "PLANE_BACKUP_REPO is empty" >&2; exit 1; }
+src=$(ls -1t "$HOME"/backups/plane/plane-*.sql.gz | head -1)
+repo="$HOME/backups/offsite"
+[[ -d $repo/.git ]] || git clone -q "https://github.com/$PLANE_BACKUP_REPO.git" "$repo"
+mkdir -p "$repo/plane"
+out="$repo/plane/$(basename "$src").gpg"
+gpg --batch --yes --pinentry-mode loopback --passphrase-file "$HOME/.backup-pass" \
+    --symmetric --cipher-algo AES256 -o "$out" "$src"
+ls -1t "$repo"/plane/*.gpg | tail -n +31 | xargs -r rm -f
+cd "$repo"
+git add -A plane
+git diff --cached --quiet || { git commit -qm "plane backup $(date +%F)"; git push -q; }
+echo "$(date) offsite ok $(du -h "$out" | cut -f1)"

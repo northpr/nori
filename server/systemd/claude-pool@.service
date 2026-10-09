@@ -1,0 +1,12 @@
+[Unit]
+Description=Claude session pool %i (new sessions from the Claude app / claude.ai/code)
+After=network-online.target
+ConditionPathExists=%h/projects/%i
+
+[Service]
+ExecStart=%h/.local/bin/claude-pool %i
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=default.target

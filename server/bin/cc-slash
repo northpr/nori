@@ -1,0 +1,13 @@
+#!/bin/bash
+# Type an allowlisted slash command into the always-on Claude session,
+# a few seconds later so it lands after the current reply finishes.
+cmd="$*"
+case "$cmd" in
+  "/clear"|"/compact"|"/model opus"|"/model sonnet"|"/model haiku") ;;
+  *) echo "cc-slash: \"$cmd\" is not allowed (allowed: /clear /compact /model opus|sonnet|haiku)" >&2; exit 2 ;;
+esac
+target="${CLAUDE_TMUX_SESSION:-}"   # set by claude-session for each area
+[ -n "$target" ] || { echo "cc-slash: only works inside a Claude session started by claude-session" >&2; exit 2; }
+systemd-run --user --quiet --on-active=4 --timer-property=AccuracySec=1s \
+  /usr/bin/tmux -L "$target" send-keys -t "$target" -l "$cmd" \; send-keys -t "$target" Enter
+echo "scheduled: $cmd"

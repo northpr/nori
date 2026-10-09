@@ -1,0 +1,17 @@
+#!/bin/bash
+# Refuse commits whose author email does not match the remote owner. Run by hooks/_dispatch, which then chains to the repo's own hook.
+url=$(git remote get-url origin 2>/dev/null)
+if [ -n "$url" ]; then
+  owner=$(echo "$url" | sed -E "s#^(https://github.com/|git@github.com:|ssh://git@github.com/)([^/]+)/.*#\2#")
+  want=$(awk -v o="$owner" "\$1==o{print \$3}" ~/.config/gh-accounts)
+  have=$(git config user.email)
+  if [ -z "$have" ]; then
+    echo "pre-commit: no git identity for this remote: $url; add its owner to nori.conf (GitHub accounts) and run setup.sh." >&2
+    exit 1
+  fi
+  if [ -n "$want" ] && [ "$have" != "$want" ]; then
+    echo "pre-commit: repo owner is $owner, so the author must be $want, but it is \"$have\". Commit blocked." >&2
+    exit 1
+  fi
+fi
+exit 0

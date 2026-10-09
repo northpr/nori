@@ -1,0 +1,2 @@
+## Previews
+To let {{OWNER_NAME}} try a change on their phone before merging, run the app with `preview start <name> -- <command>` from the repo (the port is in `$PORT`; bind to `0.0.0.0`). Send the printed `http://{{TAILNET_HOST}}:<port>` link. Only use **dev/test config** (sqlite, fake keys, dev buckets), never production. `preview list`, `preview stop <name>`, `preview logs <name>`. Previews are reachable over Tailscale only and stop by themselves after 24h; stop them when the PR is merged. Ports start at {{PREVIEW_PORT_START}}; each area gets its own block of 50.

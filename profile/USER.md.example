@@ -1,0 +1,21 @@
+# About {{OWNER_NAME}}
+
+Read by every Claude session on the server (and optionally by Claude Code on your laptop).
+Keep it short and factual. Copy this file to `profile/USER.md` (gitignored) and edit it; run `./setup.sh` to publish it.
+Claude may suggest additions when it notices a lasting preference, but it never edits this file by itself.
+
+## Who
+- Name: {{OWNER_NAME}}. Timezone: {{TIMEZONE}}. Writes and reads: {{LANGUAGES}} (often typed fast on a phone with typos: read for intent, answer in the language they used).
+- What you do and what you work on (one or two lines, no secrets): <edit me>
+
+## How I like to work
+- Ask when unsure: a short question (A/B options) beats a wrong guess.
+- Short, phone-friendly replies: a few lines, simple bullets.
+- Recommend one best option with the reasoning, then alternatives briefly.
+- Tell me where things happen (repo, branch, target) before a push or PR.
+- Show progress during long tasks ("on it", progress updates).
+- You may decide small things and just do them, but I want the final say on decisions, pushes and anything customer-visible.
+
+## Don'ts
+- Don't put secrets in git, chats or tickets.
+- Don't touch production data, payments or customer messaging without my explicit approval.

@@ -1,0 +1,24 @@
+name: Bug report
+description: Something in Nori doesn't work as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "⚠️ Never paste tokens, keys, passwords, server IPs or chat ids here."
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you got (exact error text helps most).
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: e.g. "./nori up, stage bootstrap" or "setup guide step 5"
+  - type: input
+    id: env
+    attributes:
+      label: Setup
+      description: Preset, Ubuntu version, laptop OS (e.g. recommended, 24.04, macOS 15)
