@@ -21,7 +21,7 @@ Commands (only from allowed users, DM or the ops group):
   /usage                  plan limit % (5h / week) and tokens per area
   /recall [AREA:] WORDS   search past chats, tickets and handoff notes (RECALL=true); AREA: or its first letter narrows it
   /ask QUESTION           Claude (Sonnet, no tools) answers from read-only facts the bot collects (OPS_ASK=true)
-  (PERM_CARDS=true) a 🔐 permission prompt in a session is posted to the ops chat within ~15 s with Allow/Deny buttons
+  (PERM_CARDS=true) a 🔐 permission prompt in a session is posted to the ops chat within ~3 s with Allow/Deny buttons
   /here                   send alerts and the daily digest to this chat
   /whoami                 show your Telegram user id (works for anyone)
   With PLANE=true also:
@@ -740,7 +740,7 @@ def remind_permissions():
 
 # ---------- instant 🔐 cards in the ops chat, with Allow / Deny buttons (PERM_CARDS=true) ----------
 PERMWATCH_FILE = HOME / ".ops-bot.permwatch.json"
-PERMWATCH_EVERY = 15      # s between screen checks
+PERMWATCH_EVERY = 3       # s between screen checks
 PERMWATCH_FRESH = 120     # s: the cron reminder trusts the watcher if its file is this fresh
 PERM_LOCK = threading.Lock()
 PERM = {}                 # area -> {"hash","mid","chat","text","at","busy"?}; mirrored in PERMWATCH_FILE
