@@ -1764,6 +1764,7 @@ FACTS:
 # A session runs `ask-owner` (writes {id, area, question, options, created} to ~/.ask-owner/outbox/ as the area user);
 # we post it with one button per option and type the tapped answer back into that session.
 ASK_TTL = 86400
+ASK_MAX_AGE = 3600  # an outbox request older than this is parked, not posted (no flood of stale cards after downtime)
 ASK_EVERY = 15      # s between outbox polls (each poll is a few sudo calls per area, so don't go faster)
 ASK_MARK = "[Owner tapped on Telegram]"
 
@@ -1806,15 +1807,20 @@ def ask_poll():
         rc, out = as_user(area, "find", f"{box}/outbox", "-maxdepth", "1", "-name", "*.json")
         for path in (out.splitlines() if rc == 0 else [])[:10]:
             rc, body = as_user(area, "cat", path)
+            prefix = "bad-"
             try:
-                ok = rc == 0 and ask_post(area, json.loads(body))
+                req = json.loads(body)
+                if time.time() - float(req.get("created", 0)) > ASK_MAX_AGE:
+                    prefix = "stale-"  # asked while the bot was down; the session has moved on
+                elif rc == 0 and ask_post(area, req):
+                    prefix = ""
             except (ValueError, TypeError, AttributeError):
-                ok = False  # junk file: park it, don't loop on it
+                pass  # junk file: park it, don't loop on it
             except Exception as e:
                 print(f"ask post failed: {e}", file=sys.stderr, flush=True)
                 continue  # retry next tick
             as_user(area, "mkdir", "-p", f"{box}/sent")
-            as_user(area, "mv", path, f"{box}/sent/" + ("" if ok else "bad-") + os.path.basename(path))
+            as_user(area, "mv", path, f"{box}/sent/{prefix}" + os.path.basename(path))
     with LOCK:
         state = load_state()
         old = {k: v for k, v in state.get("asks", {}).items() if time.time() - v["at"] > ASK_TTL}
@@ -1854,7 +1860,15 @@ def input_box_idle(screen):
             continue
         text = mm.group(1)
         below = lines[i + 1:]
-        if text and not text.startswith('Try "'):
+        if text.startswith((ASK_MARK, DOIT_MARK)):
+            # an earlier tap whose Enter got lost; ask_type's C-u replaces it. Skip its wrapped lines.
+            for _ in range(6):
+                if not below or BOX_RULE.match(below[0]):
+                    break
+                if DIALOG_WORDS.search(below[0]):
+                    return False
+                below = below[1:]
+        elif text and not text.startswith('Try "'):
             return False
         if not BOX_RULE.match(lines[i - 1]) or not below or not BOX_RULE.match(below[0]) or len(below) > 16:  # footer grows a line per background agent
             return False
@@ -1877,13 +1891,32 @@ def typing_blocker(area):
     return None
 
 
-def ask_type(area, text):
-    """Type text + Enter into the area's main session (same send-keys steps as nightly-handoff)."""
+def box_draft(screen):
+    """Text on the bottom-most prompt line of the input box ('' if none)."""
+    for line in reversed([l.rstrip() for l in screen.splitlines() if l.strip()]):
+        mm = BOX_PROMPT.match(line)
+        if mm:
+            return mm.group(1)
+    return ""
+
+
+def ask_type(area, text, settle=1.5):
+    """Type text + Enter into the area's main session (same send-keys steps as nightly-handoff).
+    Enter can get lost while the session is mid-turn; then press it once more, and if the text still sits
+    in the box, clear it and report failure so it can't block the next tap."""
     t = f"claude-{area}"
-    for keys in (["C-u"], ["-l", text], ["Enter"]):
-        if as_user(area, "tmux", "-L", t, "send-keys", "-t", t, *keys)[0] != 0:
-            return False
-    return True
+    send = lambda *keys: as_user(area, "tmux", "-L", t, "send-keys", "-t", t, *keys)[0] == 0
+    if not (send("C-u") and send("-l", text) and send("Enter")):
+        return False
+    for retry in (True, False):
+        time.sleep(settle)
+        rc, out = as_user(area, "tmux", "-L", t, "capture-pane", "-p", "-t", t)
+        if rc != 0 or not box_draft(out).startswith(text[:40]):
+            return True
+        if retry:
+            send("Enter")
+    send("C-u")
+    return False
 
 
 def busy_alert(cid, area, why):
