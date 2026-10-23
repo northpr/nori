@@ -100,6 +100,16 @@ class OpsBotHelpers(unittest.TestCase):
                                         " Do you want to proceed?", " ❯ 1. Yes", "   2. No"])
         self.assertIn(long_cmd, detail)
 
+    def test_perm_prompt_file_edit(self):
+        # Edit/Write dialogs ask a different question than Bash; they must post a card too
+        screen = [" Edit file", " server/rules/safety.md", " Do you want to make this edit to safety.md?",
+                  " ❯ 1. Yes", "   2. Yes, allow all edits during this session (shift+tab)", "   3. No",
+                  " Esc to cancel · Tab to amend"]
+        self.assertTrue(self.m.has_perm_prompt(screen))
+        detail, h = self.m.perm_prompt(screen)
+        self.assertEqual(detail.splitlines(), ["Edit file", "server/rules/safety.md"])
+        self.assertTrue(self.m.has_perm_prompt([" Create file", " Do you want to create notes.md?", " ❯ 1. Yes", "   2. No"]))
+
     def test_perm_prompt_strict_live_only(self):
         has = self.m.has_perm_prompt
         footer = ["", "  Esc to cancel · Tab to amend"]
