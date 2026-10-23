@@ -260,8 +260,10 @@ if chat == "telegram":   # the chat plugin's own tools (its server is named afte
     allow += [f"mcp__plugin_telegram_telegram__{t}" for t in ("reply", "edit_message", "react")]
 partial = {"permissions": {"allow": allow, "ask": ask},
            # catches the spellings the ask rules miss (git -C repo push, gh api -X PUT .../merge); see server/bin/push-guard
-           "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
-               {"type": "command", "command": "$HOME/.local/bin/push-guard"}]}]}}
+           "hooks": {"PreToolUse": [
+               # keeps ~/.secrets values out of the transcript and everything that leaves the session; see server/bin/secret-guard
+               {"matcher": "*", "hooks": [{"type": "command", "command": "$HOME/.local/bin/secret-guard"}]},
+               {"matcher": "Bash", "hooks": [{"type": "command", "command": "$HOME/.local/bin/push-guard"}]}]}}
 # no silent Claude Code self-updates: the version is pinned, upgrades go through setup.sh (claude install still works)
 partial["env"] = {"DISABLE_AUTOUPDATER": "1"}
 if flag("OPS_BOT"):

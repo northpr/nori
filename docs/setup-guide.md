@@ -354,6 +354,8 @@ The newest 7 nights per area stay on the server in `~/backups/work/` and on the 
 
 **Previews (`PREVIEWS=true`).** `preview start <name> -- <command>` inside a repo gives a link on the tailnet. Dev/test config only.
 
+**Secrets.** The owner copies a repo's `.env` to `~/.secrets/<repo>.env` (dir 700, file 600); Claude uses it only through `nori-env <repo> -- <cmd>` (`nori-env list` shows key names and age, never values). The `secret-guard` hook (all tools) blocks direct reads of `~/.secrets` and any tool call containing a secret value. See [security.md](security.md) for the limits.
+
 **Recall (`RECALL=true`).** An index of past chats and handoffs per area, refreshed every 15 minutes; `recall "words"`.
 
 **Browser (`BROWSER=true`).** Re-run bootstrap (installs Chromium into `/opt/ms-playwright`), `./setup.sh --restart`. Screenshots land in `~/shots/<area>/`.
