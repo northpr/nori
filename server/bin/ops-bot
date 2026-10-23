@@ -437,7 +437,8 @@ PERM_OPT = re.compile(r"❯\s*1\.\s*Yes")
 _BOX = "│╭╮╰╯─┃┌┐└┘ \t"
 
 
-PERM_Q = "Do you want to proceed?"
+PERM_Q = "Do you want to proceed?"  # Bash; file tools ask "Do you want to make this edit to x?", "create x?" ...
+_PERM_Q = re.compile(r"^Do you want to .{1,200}\?$")
 _PERM_OPT_LINE = re.compile(r"^(❯\s*)?\d\.\s+\S")
 _PERM_FOOTER = re.compile(r"esc to cancel|tab to amend|ctrl\+e to explain|enter to confirm", re.I)
 
@@ -448,7 +449,7 @@ def _perm_anchor(lines):
     or box-drawing leftovers. Anything else after it (new output, a prompt, chat text) means it is not live."""
     q = None
     for i, l in enumerate(lines):
-        if l.strip(_BOX).strip() == PERM_Q:
+        if _PERM_Q.match(l.strip(_BOX).strip()):
             q = i
     if q is None:
         return None

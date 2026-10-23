@@ -175,6 +175,13 @@ class RenderTests(unittest.TestCase):
                 self.assertNotEqual(r.returncode, 0, "should have been rejected")
                 self.assertIn("CLAUDE_CODE_VERSION", r.stderr)
 
+    def test_secret_guard_hook(self):
+        out = self.render("recommended", CONFIGS["recommended"])
+        pre = json.loads((out / "claude/settings.partial.json").read_text())["hooks"]["PreToolUse"]
+        by = {e["matcher"]: [h["command"] for h in e["hooks"]] for e in pre}
+        self.assertEqual(by["*"], ["$HOME/.local/bin/secret-guard"])    # every tool, not just Bash
+        self.assertEqual(by["Bash"], ["$HOME/.local/bin/push-guard"])
+
     def test_perm_cards(self):
         self.assertEqual(self.resolved(CONFIGS["recommended"]).get("PERM_CARDS"), "true")
         self.assertEqual(self.resolved(CONFIGS["starter"]).get("PERM_CARDS"), "false")
