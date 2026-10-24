@@ -7,6 +7,7 @@
   ops-bot send TEXT      send TEXT to the ops chat (used by other scripts; '-' reads stdin). Without an
                          Ops bot it goes to the owner's DM through the first area's chat bot.
   ops-bot state AREA     idle|working|permission|down (used by nightly-handoff)
+  ops-bot context-reset AREA [PCT]   handoff + /clear in that session (started by check at >= CONTEXT_RESET_PCT)
 
 Config: nori.conf (areas, allowed user ids, PLANE flag) and, never in git, ~/.ops-bot.env
   OPS_BOT_TOKEN=...            from @BotFather (write it with `set-token ops`)
@@ -303,7 +304,7 @@ def check():
         send(ops_chat(), "\n".join(msg))
     hfile.write_text(json.dumps(h))
     # prsync runs from its own cron line (`ops-bot prsync`)
-    for job in (remind_permissions, still_on_it, chat_live, claude_version_check, member_updates):
+    for job in (remind_permissions, still_on_it, chat_live, claude_version_check, member_updates, context_check):
         if job is member_updates and not PLANE_ON:
             continue
         try:
@@ -629,6 +630,160 @@ def still_on_it():
         send(ops_chat(), f"⏳ {area}: still on it · {mins} min" + (f" · {step}" if step else ""))
         last[area] = now
     STILL_FILE.write_text(json.dumps(last))
+
+
+# ---------- context health: handoff + /clear when the main session's context is nearly full ----------
+CTX_PCT = int(CONF.get("CONTEXT_RESET_PCT") or 80)   # % of the context window; 0 = off
+CTX_QUIET = 600          # s since the main session's transcript last changed
+CTX_COOLDOWN = 3600      # s between resets per area
+CTX_WAIT = 60            # x 10 s for HANDOFF.md, same as nightly-handoff
+CTX_FILE = HOME / ".ops-bot.context.json"   # area -> {"at": epoch, "sid": session reset last}
+CTX_MARK = "Context handoff ("
+CTX_PROMPT = (CTX_MARK + "context {pct}% full): do the 'Fresh start each night' handoff steps from ~/projects/CLAUDE.md "
+              "now (overwrite {f}). /clear follows. Reply only here in the terminal with 'handoff done', not in the chat.")
+
+
+def _hm(s, default):
+    try:
+        h, m = (int(x) for x in str(s).split(":"))
+        return h * 60 + m
+    except ValueError:
+        return default
+
+
+# local minutes: from 30 min before the nightly handoff to the update reboot window
+CTX_NIGHT = ((_hm(CONF.get("HANDOFF_TIME", "03:45"), 225) - 30) % 1440, _hm(CONF.get("AUTO_REBOOT_TIME", "04:30"), 270))
+
+
+def in_window(minute, window):
+    a, b = window
+    return a <= minute < b if a <= b else minute >= a or minute < b
+
+
+def _read_json(area, path):
+    rc, out = as_user(area, "cat", str(path))
+    try:
+        return json.loads(out) if rc == 0 and out else None
+    except ValueError:
+        return None
+
+
+def _mtime(area, path):
+    rc, out = as_user(area, "stat", "-c", "%Y", str(path))
+    return int(out) if rc == 0 and out.isdigit() else 0
+
+
+def context_snapshot(area):
+    """{'ts', 'session_id', 'pct'} written by usage-snapshot in the main session, or None."""
+    return _read_json(area, area_home(area) / ".claude" / f"context-claude-{area}.json")
+
+
+def main_transcript(area, snap):
+    """The main session's own transcript (pool sessions write to the same folder)."""
+    sid = (snap or {}).get("session_id") or ""
+    return transcript_dir(area) / f"{sid}.jsonl" if re.fullmatch(r"[\w-]+", sid) else None
+
+
+def user_turn_since(raw, since):
+    """True if the transcript has new owner input after `since` (chat, Remote Control, a tap, attach): a user turn,
+    or input queued into a running turn. Not: our own handoff prompt, tool results, meta lines (skill bodies,
+    caveats) or queued task notifications."""
+    for line in raw.splitlines():
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if o.get("isSidechain") or o.get("isMeta") or _ts(o.get("timestamp")) <= since:
+            continue
+        a = o.get("attachment") if o.get("type") == "attachment" else None
+        if isinstance(a, dict) and a.get("type") == "queued_command":
+            if a.get("commandMode") != "task-notification" and not str(a.get("prompt", "")).lstrip().startswith(CTX_MARK):
+                return True
+            continue
+        if o.get("type") != "user":
+            continue
+        c = (o.get("message") or {}).get("content")
+        blocks = [{"type": "text", "text": c}] if isinstance(c, str) else [b for b in c or [] if isinstance(b, dict)]
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").lstrip()
+        if text and not text.startswith(CTX_MARK):
+            return True
+    return False
+
+
+def context_skip(snap, last, now, local_min, quiet_for, blocker):
+    """None when a reset should start, else a short reason. Pure, for tests."""
+    if not snap or snap.get("pct") is None:
+        return "no snapshot"
+    if snap["pct"] < CTX_PCT:
+        return f"{snap['pct']:.0f}% < {CTX_PCT}%"
+    if now - last.get("at", 0) < CTX_COOLDOWN:
+        return "cooldown"
+    if snap.get("session_id") and snap.get("session_id") == last.get("sid"):
+        return "already reset (no newer snapshot since /clear)"
+    if in_window(local_min, CTX_NIGHT):
+        return "nightly handoff window"
+    if quiet_for is None or quiet_for < CTX_QUIET:
+        return "active in the last 10 min"
+    return blocker
+
+
+def context_check():
+    """Cron: start `ops-bot context-reset AREA` in the background for each area that needs it."""
+    if CTX_PCT <= 0:
+        return
+    try:
+        state = json.loads(CTX_FILE.read_text())
+    except (OSError, ValueError):
+        state = {}
+    now = time.time()
+    for area in AREAS:
+        snap = context_snapshot(area)
+        if not snap or (snap.get("pct") or 0) < CTX_PCT or not configured(area):
+            continue
+        tr = main_transcript(area, snap)
+        changed = _mtime(area, tr) if tr else 0
+        quiet = now - changed if changed else None
+        lt = datetime.datetime.now(TZ)
+        st = session_state(area)[0]
+        blocker = st if st != "idle" else typing_blocker(area)
+        why = context_skip(snap, state.get(area, {}), now, lt.hour * 60 + lt.minute, quiet, blocker)
+        if why:
+            print(f"context {area} {snap['pct']:.0f}%: skip, {why}", flush=True)
+            continue
+        state[area] = {"at": now, "sid": snap.get("session_id") or ""}
+        CTX_FILE.write_text(json.dumps(state))
+        with open(HOME / "logs/ops-bot.log", "a") as log:
+            subprocess.Popen([sys.executable, "-I", os.path.abspath(sys.argv[0]), "context-reset", area, f"{snap['pct']:.0f}"],
+                             stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        print(f"context {area} {snap['pct']:.0f}%: reset started", flush=True)
+
+
+def context_reset(area, pct):
+    """Ask the main session for the handoff steps, wait for HANDOFF.md, then /clear. Never clears without a handoff."""
+    head = f"{area} context {pct}%"
+    f = area_home(area) / "projects" / area / "HANDOFF.md"
+    before, start = _mtime(area, f), int(time.time()) - 1   # transcript timestamps are whole seconds here (_ts)
+    tr = main_transcript(area, context_snapshot(area))
+    size = as_user(area, "stat", "-c", "%s", str(tr))[1] if tr else ""
+    # everything written since the prompt, however long the handoff turn was
+    wrote = lambda: not size.isdigit() or user_turn_since(as_user(area, "tail", "-c", f"+{int(size) + 1}", str(tr), timeout=30)[1], start)
+    idle = lambda: session_state(area)[0] == "idle" and not typing_blocker(area)
+    if not idle() or not ask_type(area, CTX_PROMPT.format(pct=pct, f=f)):
+        return f"⏭ {head}: session got busy, not cleared (next try in 1 h)"
+    for _ in range(CTX_WAIT):
+        time.sleep(10)
+        if _mtime(area, f) > before and session_state(area)[0] == "idle":
+            break
+    else:
+        return f"⚠️ {head}: no handoff after 10 min, not cleared"
+    time.sleep(5)   # let the turn's footer settle, then check right before typing
+    if not idle():
+        return f"⚠️ {head}: handoff saved, session busy, not cleared"
+    if wrote():   # last check, right before typing
+        return f"⏭ {head}: you wrote meanwhile, handoff saved but not cleared (next try in 1 h)"
+    if not ask_type(area, "/clear"):
+        return f"⚠️ {head}: handoff saved, /clear didn't go through"
+    return f"🧹 {head} → handoff + fresh start ✅"
 
 
 # ---------- is the Telegram bot really receiving? (the plugin can give up polling while its process stays alive) ----------
@@ -2346,6 +2501,11 @@ if __name__ == "__main__":
         print(progress_text())
     elif mode == "state":
         print(session_state(sys.argv[2])[0])
+    elif mode == "context-reset":
+        msg = context_reset(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "?")
+        print(f"context-reset {sys.argv[2]}: {msg}", flush=True)
+        if ops_chat():
+            send(ops_chat(), msg)
     elif mode == "send":
         text = sys.stdin.read() if sys.argv[2:] == ["-"] else " ".join(sys.argv[2:])
         chat = ops_chat()
