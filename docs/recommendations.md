@@ -48,6 +48,7 @@ Difficulty: 🟢 easy (minutes) · 🟡 medium (half an hour) · 🔴 more work 
 | [ ] | Encrypted off-site backups of Plane | a dead server doesn't take your tickets with it | `PLANE_OFFSITE_BACKUP=true`, `BACKUP_REPO` | 🟡 store the passphrase! |
 | [ ] | Close public SSH | only the tailnet can reach the box | `sudo ufw delete allow 22/tcp` (after Tailscale works) | 🟡 careful |
 | [ ] | Your own rules and skills | teach the sessions your conventions once | `local/rules/*.md`, `local/skills/` | 🟡 |
+| [ ] | Same rules on your laptop | Claude Code on your laptop follows the same push/PR and proof rules in every project | `./laptop/setup-laptop.sh --dry-run`, then without `--dry-run` | 🟢 only adds |
 
 ## Habits that matter more than settings
 - **Quick task → chat bot. Deep work → a pool session.** The chat session stays responsive; long refactors run next to it.

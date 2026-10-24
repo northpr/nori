@@ -198,7 +198,8 @@ sections = [
     (f"chat/{chat}/rules-group.md", flag("OPS_BOT")),
     ("server/rules/15-ask-owner.md", flag("OPS_BOT")),
     ("server/rules/20-git.md", True),
-    ("server/rules/25-proof.md", True),
+    ("rules/core/git.md", True),       # shared with laptops (laptop/CLAUDE.md)
+    ("rules/core/proof.md", True),
     ("server/rules/30-handoff.md", flag("HANDOFF")),
     ("server/rules/40-learning.md", True),
     ("server/rules/50-safety.md", True),
