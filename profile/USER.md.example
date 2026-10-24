@@ -11,6 +11,7 @@ Claude may suggest additions when it notices a lasting preference, but it never 
 ## How I like to work
 - Ask when unsure: a short question (A/B options) beats a wrong guess.
 - Short, phone-friendly replies: a few lines, simple bullets.
+- Reply language (optional; delete this line to follow whatever language I write in): always reply in <language>, keeping technical words in English (branch, PR, merge, deploy, file paths, commands, error text). Code, commits, PRs and tickets stay in English.
 - Recommend one best option with the reasoning, then alternatives briefly.
 - Tell me where things happen (repo, branch, target) before a push or PR.
 - Show progress during long tasks ("on it", progress updates).
