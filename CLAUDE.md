@@ -98,5 +98,6 @@ Summarize what they have (preset, areas, bots, flags), offer `docs/recommendatio
 ## Where things are
 - `nori.conf.example` / `nori.conf`: the one config. `scripts/render.py` turns it into the generated files.
 - `server/rules/*.md` + `chat/<chat>/rules*.md`: the rules the server session follows (optional sections only when their flag is on).
+- `rules/core/*.md`: rules shared by the server sessions and the user's laptop (git/PR habits, proof before claims; no `{{placeholders}}`). `laptop/setup-laptop.sh` (`--dry-run` first) makes every Claude Code project on the laptop load them: it appends one import line to `~/.claude/CLAUDE.md` (backup first) and links the repo's skills whose names are free. It never touches `settings.json`.
 - `bootstrap.sh`, `setup.sh`, `setup-user.sh`: how the server gets built and kept in sync.
 - `docs/`: `setup-guide.md` (the tutorial, presets table), `tech-stack.md` (each piece: what, why, cost, gotchas), `recommendations.md` (checklist "to get a setup like ours"), `troubleshooting.md`, `adding-a-chat-platform.md`.
