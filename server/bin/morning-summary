@@ -116,7 +116,7 @@ PROMPT="You write a short morning digest for a developer, read on a phone in a c
 Below are facts about their git repos (and possibly other sections such as tickets).
 Write:
 - 'Active': only the 3 repos with the fewest days since last commit, 1-3 short lines each (repo name first with an emoji; mention branch only if not main/master, behind/ahead/uncommitted only if non-zero, open PRs/issues, how fresh the last commit is). Note 'gh unavailable' briefly if present.
-- 'Quiet >1 month': every repo with more than 30 days since last commit, one line each: name, how long idle, and what it is in a few words (from 'about'). Leave the section out entirely if there are none.
+- 'Quiet >1 month': repos with more than 30 days since last commit, one line each, at most 5 (most recent activity first, oldest last), then '+N more' for the rest: name, how long idle, and what it is in a few words (from 'about'). Leave the section out entirely if there are none.
 - other repos: leave them out, except one line for any of them with open PRs or uncommitted files.
 - if there are Plane tickets: one 'Tickets' line counting open tickets by involvement label (🤖 auto = Claude can do alone, ⚡ quick-ask = waiting for a quick answer, 🧠 needs-me = waiting for the owner's decision), then list the ⚡ and 🧠 ones by id and title (they need the owner).
 - then a line 'Suggested focus today' followed by at most 3 bullets (suggest 'send: do the auto tickets' when there are 🤖 tickets).

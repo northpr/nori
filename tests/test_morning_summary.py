@@ -62,6 +62,8 @@ class MorningSummaryFacts(unittest.TestCase):
         text = SCRIPT.read_text()
         self.assertIn("only the 3 repos with the fewest days since last commit", text)
         self.assertIn("more than 30 days since last commit", text)
+        self.assertIn("at most 5", text)
+        self.assertIn("'+N more'", text)
 
 
 if __name__ == "__main__":
