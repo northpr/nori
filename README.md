@@ -35,15 +35,32 @@ On a Mac, the first `git` may show a popup to install Apple's developer tools: c
 <td valign="top">
 
 **What you get**
-- An always-on Claude session that you chat with on Telegram (👀 = got it), with a fresh start every night.
-- 🔐 Allow / Deny cards for pushes and merges, and tap-to-answer buttons.
+- An always-on Claude session that you chat with on Telegram (👀 = got it), with a fresh start every night, and a handoff plus `/clear` mid-day when its context gets 80% full.
+- 🔐 Allow / Deny cards for pushes, merges and file edits, and tap-to-answer buttons.
 - An **Ops bot**: `/status`, `/progress`, `/restart`, alerts, a daily digest, `/usage`, `/recall`.
 - Previews on your phone over Tailscale, extra sessions from the Claude app.
+- Secrets kept out of chats and git: `nori-env` hands them to a command, `secret-guard` blocks reads.
+- Proof before claims: bugs get a repro first, speed claims need numbers, odd code gets a `why` check before it's removed.
+- Replies in your language (or one fixed language), with technical words kept in English.
 - Optional: Plane tickets from the chat, encrypted backups, separate `personal` and `work` areas.
 
 </td>
 </tr>
 </table>
+
+<p align="center">
+  <img src="assets/readme/screens.svg" alt="Three Telegram screens: the Ops bot's morning digest with repos, tickets and a suggested focus; Nori asking a question with tap-to-answer buttons and acting on the tap; the /board ticket list grouped by Doing, To do and Backlog" width="100%">
+</p>
+
+## Works with your other apps
+| App | What Nori does with it |
+|---|---|
+| 💬 **Telegram** | Your main remote: chat with each area's bot, tap 🔐 Allow / Deny, get alerts and the morning digest. |
+| 📱 **Claude app** (iOS, Android, claude.ai/code) | Open extra sessions on the server, or drop into a running one with Remote Control. |
+| 🐙 **GitHub** | Branches, commits and PRs with the right account per repo owner. Pushes and merges always ask you first. |
+| 💻 **Your laptop** | `laptop/setup-laptop.sh` makes Claude Code on your laptop follow the same core rules as the server, in every project. |
+| 🔒 **Tailscale** | Private previews of your app on your phone, and Plane, without opening any port. |
+| 📋 **Plane** (optional) | Self-hosted tickets: create them from the chat, see them in `/board`, and the session keeps decisions there. |
 
 ## Pick a preset
 One line in `nori.conf`; every feature can still be switched on or off later. Full table: [docs/setup-guide.md](docs/setup-guide.md#presets).
