@@ -360,7 +360,7 @@ The newest 7 nights per area stay on the server in `~/backups/work/` and on the 
 
 **Recall (`RECALL=true`).** An index of past chats and handoffs per area, refreshed every 15 minutes; `recall "words"`.
 
-**Agent board (`AGENT_BOARD=true`).** A hook on Claude's sub-agents: it refuses a new agent when `AGENT_CAP` are already running (Claude is told to wait for one to finish), keeps one pinned `🤖 Agents` message in the chat up to date, and pings when an agent that ran 3+ minutes finishes. The session rules also get the agent team section (tiers, council, reviewers). The hook never blocks on its own errors, and stays silent in pool sessions. Needs `./setup.sh --restart`. Turning the flag off later removes the cap hook but leaves the two board hooks in `~/.claude/settings.json`; delete the `SubagentStart` and `SubagentStop` entries there by hand.
+**Agent board (`AGENT_BOARD=true`).** A hook on Claude's sub-agents: it refuses a new agent when `AGENT_CAP` are already running (Claude is told to wait for one to finish), keeps one pinned `🤖 Agents` message in the chat up to date, and pings when an agent that ran 3+ minutes finishes. The session rules also get the agent team section (tiers, council, reviewers). The hook never blocks on its own errors, and stays silent in pool sessions. Needs `./setup.sh --restart`.
 
 **Browser (`BROWSER=true`).** Re-run bootstrap (installs Chromium into `/opt/ms-playwright`), `./setup.sh --restart`. Screenshots land in `~/shots/<area>/`.
 

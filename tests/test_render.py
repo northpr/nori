@@ -149,7 +149,7 @@ class RenderTests(unittest.TestCase):
             self.assertIn("Cap: 5 agents at once, 3 when plan usage is high", rules)
         self.assertEqual(self.resolved(CONFIGS["starter"]).get("AGENT_BOARD"), "false")
         h = hooks("starter", CONFIGS["starter"])
-        self.assertEqual(list(h), ["PreToolUse"])
+        self.assertEqual((h["SubagentStart"], h["SubagentStop"]), ([], []))   # clears hooks from an earlier run
         self.assertFalse([e for e in h["PreToolUse"] if "agent-board" in json.dumps(e)])
         self.assertNotIn("Agent teams", (self.render("starter", CONFIGS["starter"]) / "CLAUDE.md").read_text())
         # flag override both ways, and the numbers reach the rules and the resolved conf
@@ -159,6 +159,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("Cap: 2 agents at once, 1 when", (self.render("on", on) / "CLAUDE.md").read_text())
         off = CONFIGS["recommended"] + "AGENT_BOARD=false\n"
         self.assertNotIn("agent-board", json.dumps(hooks("off", off)))
+        h = hooks("off", off)
+        self.assertEqual((h["SubagentStart"], h["SubagentStop"]), ([], []))
         self.assertEqual(self.resolved(CONFIGS["recommended"]).get("AGENT_CAP"), "5")
         self.assertEqual(self.resolved(CONFIGS["recommended"]).get("AGENT_CAP_HIGH"), "3")
 

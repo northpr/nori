@@ -279,6 +279,10 @@ if flag("AGENT_BOARD"):
     partial["hooks"]["PreToolUse"].append({"matcher": "Agent|Task", "hooks": [ab]})
     partial["hooks"]["SubagentStart"] = [{"hooks": [ab]}]
     partial["hooks"]["SubagentStop"] = [{"hooks": [ab]}]
+else:
+    # merge_json replaces arrays, so empty lists clear hooks left from an earlier run with the flag on
+    partial["hooks"]["SubagentStart"] = []
+    partial["hooks"]["SubagentStop"] = []
 # no silent Claude Code self-updates: the version is pinned, upgrades go through setup.sh (claude install still works)
 partial["env"] = {"DISABLE_AUTOUPDATER": "1"}
 # the ghost-text suggestion reads as an unsent draft, so the Ops bot refused every ask-owner tap as "busy"
