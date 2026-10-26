@@ -146,7 +146,7 @@ class RenderTests(unittest.TestCase):
             self.assertEqual([e["matcher"] for e in h["PreToolUse"]][:2], ["*", "Bash"])   # guards stay first
             rules = (self.render(name, CONFIGS[name]) / "CLAUDE.md").read_text()
             self.assertIn("Agent teams", rules)
-            self.assertIn("Cap: 5 agents at once, 3 when plan usage is high", rules)
+            self.assertIn("Cap: 5 agents at once per session, 3 when plan usage is high", rules)
         self.assertEqual(self.resolved(CONFIGS["starter"]).get("AGENT_BOARD"), "false")
         h = hooks("starter", CONFIGS["starter"])
         self.assertEqual((h["SubagentStart"], h["SubagentStop"]), ([], []))   # clears hooks from an earlier run
@@ -156,7 +156,7 @@ class RenderTests(unittest.TestCase):
         on = CONFIGS["starter"] + 'AGENT_BOARD=true\nAGENT_CAP=2\nAGENT_CAP_HIGH=1\nAGENT_BOARD_CHAT="-1001"\n'
         r = self.resolved(on)
         self.assertEqual((r["AGENT_BOARD"], r["AGENT_CAP"], r["AGENT_CAP_HIGH"], r["AGENT_BOARD_CHAT"]), ("true", "2", "1", "-1001"))
-        self.assertIn("Cap: 2 agents at once, 1 when", (self.render("on", on) / "CLAUDE.md").read_text())
+        self.assertIn("Cap: 2 agents at once per session, 1 when", (self.render("on", on) / "CLAUDE.md").read_text())
         off = CONFIGS["recommended"] + "AGENT_BOARD=false\n"
         self.assertNotIn("agent-board", json.dumps(hooks("off", off)))
         h = hooks("off", off)
