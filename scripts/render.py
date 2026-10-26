@@ -268,6 +268,8 @@ partial = {"permissions": {"allow": allow, "ask": ask},
                {"matcher": "Bash", "hooks": [{"type": "command", "command": "$HOME/.local/bin/push-guard"}]}]}}
 # no silent Claude Code self-updates: the version is pinned, upgrades go through setup.sh (claude install still works)
 partial["env"] = {"DISABLE_AUTOUPDATER": "1"}
+# the ghost-text suggestion reads as an unsent draft, so the Ops bot refused every ask-owner tap as "busy"
+partial["promptSuggestionEnabled"] = False
 if flag("OPS_BOT"):
     # saves plan-limit usage (5h / weekly) for the Ops bot's /usage and shows it in the session status line
     partial["statusLine"] = {"type": "command", "command": "$HOME/.local/bin/usage-snapshot"}
