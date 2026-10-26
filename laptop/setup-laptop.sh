@@ -37,8 +37,8 @@ else
   fi
 fi
 
-# 2. shared skills, only where the name is free
-for d in "$R"/skills/*/ "$R"/local/skills/*/; do
+# 2. shared skills (skills/, laptop/skills/ = laptop only, local/skills/), only where the name is free
+for d in "$R"/skills/*/ "$R"/laptop/skills/*/ "$R"/local/skills/*/; do
   [[ -f $d/SKILL.md ]] || continue
   src="${d%/}"; name="$(basename "$src")"; dst="$C/skills/$name"
   if [[ -L $dst && "$(readlink "$dst")" == "$src" ]]; then

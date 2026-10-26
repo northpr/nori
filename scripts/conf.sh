@@ -69,7 +69,7 @@ area_home() { getent passwd "$1" | cut -d: -f6; }
 # nori_bin_wanted <script name> -> should this helper script be installed with the current flags?
 nori_bin_wanted() {
   case "$1" in
-    plane-mcp)                         is_on PLANE ;;
+    plane-mcp|plane-ticket)            is_on PLANE ;;
     plane-backup)                      is_on PLANE ;;
     plane-offsite)                     is_on PLANE && is_on PLANE_OFFSITE_BACKUP ;;
     work-backup|work-offsite)          is_on WORK_BACKUP ;;
