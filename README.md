@@ -48,6 +48,10 @@ On a Mac, the first `git` may show a popup to install Apple's developer tools: c
 </tr>
 </table>
 
+<p align="center">
+  <img src="assets/readme/screens.svg" alt="Three Telegram screens: the Ops bot's morning digest with repos, tickets and a suggested focus; Nori asking a question with tap-to-answer buttons and acting on the tap; the /board ticket list grouped by Doing, To do and Backlog" width="100%">
+</p>
+
 ## Works with your other apps
 | App | What Nori does with it |
 |---|---|
