@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """Agent board: Claude Code hook + small CLI that tracks the session's sub-agents, caps parallel ones per session and keeps ONE pinned Telegram message up to date.
 Hook (`agent-board hook`, JSON on stdin): PreToolUse (matcher Agent|Task) enforces the cap, SubagentStart/SubagentStop update the board.
-Registered by render.py in settings.partial.json when AGENT_BOARD=true. Any error lets the call through. CLI: `note "<label|id>" "<text>"`, `clear "<label>"`, `show`, `reset`, `--selftest`.
+Registered by render.py in settings.partial.json when AGENT_BOARD=true. Any error lets the call through. CLI: `note "<label|id>" "<text>"`, `clear "<label>"`, `show`, `reset` (marks running agents of ALL sessions of this Linux user lost), `--selftest`.
 State: ~/.agent-board/state.json. Env (set by claude-session): AGENT_BOARD_CAP, AGENT_BOARD_CAP_HIGH, AGENT_BOARD_CHAT.
 Telegram is skipped in pool sessions (CLAUDE_POOL=1) or without token/chat."""
 import fcntl
@@ -121,42 +121,53 @@ def tg(method, **params):
         return {"ok": False, "description": type(e).__name__}
 
 
-JOBS = []  # Telegram work queued under the lock, done by flush() after it is released (HTTP must not hold the flock)
+JOBS = []  # Telegram work queued under the state lock, done by flush() after it is released (HTTP must not hold it)
 
 
 def update(st, ping=None):
     token, chat = creds()
     if os.environ.get("CLAUDE_POOL") == "1" or not token or not chat:
         return
-    JOBS.append({"chat": chat, "text": render(st), "board": dict(st["board"]), "day": date.today().isoformat(), "ping": ping})
+    JOBS.append({"chat": chat, "ping": ping})
 
 
-def push(j):
+def push(chat, board, text, day):
     """Edit the pinned message, or post and pin a new one. Returns the new board dict, or None when nothing changed."""
-    chat, b = j["chat"], j["board"]
-    if b.get("message_id") and str(b.get("chat_id")) == chat and b.get("day") == j["day"]:
-        r = tg("editMessageText", chat_id=chat, message_id=b["message_id"], text=j["text"])
+    b = board
+    if b.get("message_id") and str(b.get("chat_id")) == chat and b.get("day") == day:
+        r = tg("editMessageText", chat_id=chat, message_id=b["message_id"], text=text)
         why = str(r.get("description", "")).lower()
         if r.get("ok") or "not modified" in why:
             return None
         if not any(x in why for x in ("message to edit not found", "can't be edited", "message_id_invalid")):
             return None  # 429, 5xx, network: skip, the next event retries
-    mid = (tg("sendMessage", chat_id=chat, text=j["text"], disable_notification=True).get("result") or {}).get("message_id")
+    mid = (tg("sendMessage", chat_id=chat, text=text, disable_notification=True).get("result") or {}).get("message_id")
     if not mid:
         return None
     if b.get("message_id") and str(b.get("chat_id")) == chat:
         tg("unpinChatMessage", chat_id=chat, message_id=b["message_id"])
     tg("pinChatMessage", chat_id=chat, message_id=mid, disable_notification=True)  # a failed pin is not an error
-    return {"chat_id": chat, "message_id": mid, "day": j["day"]}
+    return {"chat_id": chat, "message_id": mid, "day": day}
 
 
 def flush():
     jobs, JOBS[:] = list(JOBS), []
-    for j in jobs:
-        nb = push(j)
+    if not jobs:
+        return
+    chat = jobs[-1]["chat"]
+    # One board update per process. send.lock serializes the whole push across processes, so two hooks that both
+    # saw "no board yet" can't both post and pin; inside it we read the CURRENT board and render the newest text.
+    d = Path.home() / ".agent-board"
+    d.mkdir(mode=0o700, exist_ok=True)
+    with open(d / "send.lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        with locked() as st:
+            board, text = dict(st["board"]), render(st)
+        nb = push(chat, board, text, date.today().isoformat())
         if nb:
             with locked() as st:
                 st["board"] = nb
+    for j in jobs:
         if j["ping"]:
             tg("sendMessage", chat_id=j["chat"], text=j["ping"])
 
@@ -189,7 +200,8 @@ def start(inp, st):
 
 
 def stop(inp, st):
-    r = next((r for r in st["rows"] if r["id"] and r["id"] == inp.get("agent_id") and r["status"] == "running"), None)
+    # also "lost": a `reset` from a sibling session may have written off an agent that was still running
+    r = next((r for r in st["rows"] if r["id"] and r["id"] == inp.get("agent_id") and r["status"] in ("running", "lost")), None)
     if not r:
         return
     r["status"], r["ended"] = "done", now()

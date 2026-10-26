@@ -274,6 +274,32 @@ class Board(unittest.TestCase):
         self.pre("y"); self.start("c")
         self.assertIn("sendMessage", [c[0] for c in self.calls])
 
+    def test_parallel_starts_post_and_pin_once(self):
+        # two hooks both update state before either flushes: only one may send+pin, the other edits
+        self.telegram()
+        for aid in ("a", "b"):
+            self.pre(aid)                      # flush already ran in hook(); redo the race by hand below
+        self.calls.clear()
+        with self.m.locked() as st:
+            st["board"] = {}
+        with self.m.locked() as st:
+            self.m.start({"agent_id": "a", "agent_type": "general-purpose", "session_id": "s"}, st)
+        ja = list(self.m.JOBS); self.m.JOBS.clear()
+        with self.m.locked() as st:
+            self.m.start({"agent_id": "b", "agent_type": "general-purpose", "session_id": "s"}, st)
+        jb = list(self.m.JOBS); self.m.JOBS.clear()
+        self.m.JOBS[:] = ja; self.m.flush(); self.m.JOBS[:] = jb; self.m.flush()
+        self.assertEqual([c[0] for c in self.calls], ["sendMessage", "pinChatMessage", "editMessageText"])
+        self.assertEqual(self.calls[2][1]["message_id"], 7)
+        self.assertEqual(self.state()["board"]["message_id"], 7)
+
+    def test_stop_after_reset_marks_done(self):
+        self.pre("job"); self.start("a")
+        self.m.cli(["reset"])
+        self.assertEqual(self.state()["rows"][0]["status"], "lost")
+        self.stop("a")
+        self.assertEqual(self.state()["rows"][0]["status"], "done")
+
     def test_hook_fails_open_on_any_error(self):
         # a bug in the cap logic or the state file must never block an Agent call
         with mock.patch.object(self.m, "caps", side_effect=ValueError("bad env")):
