@@ -31,6 +31,7 @@ Difficulty: 🟢 easy (minutes) · 🟡 medium (half an hour) · 🔴 more work 
 | [ ] | Use `plan:` before big changes | Claude proposes a plan first, you say go; fewer surprises in big refactors | habit: start the message with `plan:` | 🟢 |
 | [ ] | Previews | open the app Claude just built on your phone, tailnet-only | `PREVIEWS=true` | 🟢 |
 | [ ] | Browser | Claude takes screenshots to check its own UI work | `BROWSER=true` (re-run bootstrap) | 🟢 |
+| [ ] | Agent board | caps parallel sub-agents and shows them in one pinned message; agent team rules for bigger tasks | `AGENT_BOARD=true` | 🟢 |
 | [ ] | Recall | "what did we decide about X last week?" searches past chats and handoffs | `RECALL=true` | 🟢 |
 | [ ] | A group chat ("Nori HQ") | alerts, the digest and all your bots in one place | `/here` to the Ops bot in the group | 🟢 |
 
