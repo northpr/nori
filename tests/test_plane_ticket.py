@@ -132,10 +132,15 @@ class OnlyWithPlane(unittest.TestCase):
         self.assertEqual(self.wanted("false"), "no")
 
     def test_laptop_script_links_the_skill(self):
-        self.assertTrue((REPO / "skills/plane-ticket/SKILL.md").is_file())
+        self.assertTrue((REPO / "laptop/skills/plane-ticket/SKILL.md").is_file())
+        self.assertFalse((REPO / "skills/plane-ticket").exists())
         r = subprocess.run(["bash", str(REPO / "laptop/setup-laptop.sh"), "--dry-run"], env={"HOME": tempfile.mkdtemp(), "PATH": os.environ["PATH"]},
                            capture_output=True, text=True)
         self.assertIn("link skill plane-ticket", r.stdout)
+
+    def test_server_setup_does_not_link_laptop_skills(self):
+        for f in ("setup.sh", "setup-user.sh"):
+            self.assertNotIn("laptop/skills", (REPO / f).read_text(), f)
 
 
 if __name__ == "__main__":
