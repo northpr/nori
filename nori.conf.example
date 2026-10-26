@@ -89,6 +89,8 @@ CLAUDE_CODE_VERSION=""
 #                                 # read-only facts the bot collects (status, logs, journals, docs)
 # DIGEST=true                     # daily repo digest (Ops chat, or your DM without the Ops bot)
 # HANDOFF=true                    # nightly handoff note + fresh restart of idle sessions
+# CONTEXT_RESET_PCT=80           # mid-day handoff + /clear when an idle session's context is this full
+#                                 # (Ops bot, checked every 5 min, max once an hour). 0 = off
 # POOL_SESSIONS=true              # session pool per area: start extra Claude sessions from the Claude
 #                                 # app / claude.ai/code (no chat bot). Needs a one-time Remote Control
 #                                 # consent per area user, see docs/setup-guide.md step 5.
