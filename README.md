@@ -52,6 +52,17 @@ On a Mac, the first `git` may show a popup to install Apple's developer tools: c
   <img src="assets/readme/screens.svg" alt="Three Telegram screens: the Ops bot's morning digest with repos, tickets and a suggested focus; Nori asking a question with tap-to-answer buttons and acting on the tap; the /board ticket list grouped by Doing, To do and Backlog" width="100%">
 </p>
 
+## Nori works your ticket queue
+With Plane tickets on, every ticket gets an involvement label, so Nori knows how much of it to do alone:
+
+| Label | What Nori does |
+|---|---|
+| 🤖 **auto** | Small and clear (a bug with an obvious fix, a typo, tests, a dependency bump). Nori does it end to end: branch, fix, tests, PR, a comment on the ticket. You only tap 🔐 Allow on the push. |
+| ⚡ **quick-ask** | Needs a short answer first. Nori asks 1 to 3 A/B questions in the chat, you tap an answer, and it carries on as for auto. |
+| 🧠 **needs-me** | A real decision (product, architecture, money, anything customer-visible). Nori doesn't start: it writes 2 to 3 options with a recommendation on the ticket and waits for your pick. |
+
+Send **"do the auto tickets"** and Nori works through the 🤖 ones by priority, one at a time, and stops at the first that needs you. If one turns out bigger than it looked, Nori relabels it and tells you. Production data, payments, customer messages and deploys are never auto. The morning digest and `/board` show the 🤖 ⚡ 🧠 counts, so you see at a glance what is waiting on you. Turn it on with the 🚀 full preset or `PLANE=true`.
+
 ## Works with your other apps
 | App | What Nori does with it |
 |---|---|
