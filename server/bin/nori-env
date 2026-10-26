@@ -1,0 +1,71 @@
+#!/usr/bin/env -S python3 -I
+"""Run one command with a project's secrets from ~/.secrets/<project>.env (SRV-21).
+
+  nori-env <project> -- <cmd> [args...]   vars only live in that command's environment
+  nori-env list                           project files with key names and age, never values
+
+The owner copies a repo's .env to ~/.secrets/<repo>.env (dir 700, file 600). The vars are
+loaded on top of the current environment, and NORI_ENV_FILE points at the file: tools that read
+a .env path themselves can be pointed at "$NORI_ENV_FILE". Never writes a .env anywhere.
+secret-guard blocks direct reads of ~/.secrets and any tool call that would leak a value."""
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+SECRETS = Path.home() / ".secrets"
+NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def parse(path):
+    out = {}
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            out[key] = val
+    return out
+
+
+def list_projects():
+    files = sorted(SECRETS.glob("*.env")) if SECRETS.is_dir() else []
+    if not files:
+        print(f"no secrets yet: copy a repo .env to {SECRETS}/<repo>.env (chmod 600)")
+        return 0
+    for f in files:
+        days = int((time.time() - f.stat().st_mtime) // 86400)
+        mode = oct(f.stat().st_mode & 0o777)[2:]
+        warn = "  ⚠️ chmod 600" if mode != "600" else ""
+        print(f"{f.stem}  ({days}d old, mode {mode}){warn}: {', '.join(sorted(parse(f)))}")
+    return 0
+
+
+def main(argv):
+    if argv[:1] == ["list"]:
+        return list_projects()
+    if len(argv) < 3 or argv[1] != "--" or not NAME.match(argv[0]):
+        print(__doc__.split("\n\n")[0], file=sys.stderr)
+        return 2
+    path = SECRETS / f"{argv[0]}.env"
+    if not path.is_file():
+        print(f"nori-env: no {path} (ask the owner to copy that repo's .env there)", file=sys.stderr)
+        return 1
+    env = dict(os.environ, **parse(path))
+    env.update(NORI_ENV_FILE=str(path))
+    try:
+        os.execvpe(argv[2], argv[2:], env)
+    except FileNotFoundError:
+        print(f"nori-env: command not found: {argv[2]}", file=sys.stderr)
+        return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

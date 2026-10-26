@@ -3,6 +3,8 @@
 
 Reads the statusLine JSON on stdin; writes ~/.claude/usage-snapshot.json atomically:
   {"ts": epoch, "five_hour": {"used_percentage", "resets_at"}, "seven_day": {...}}  (windows absent when Claude doesn't send them)
+In the main Telegram session (claude-session sets CLAUDE_TMUX_SESSION; pool sessions don't) it also writes
+~/.claude/context-<tmux session>.json {"ts", "session_id", "pct"} for the Ops bot's context reset.
 """
 import json
 import os
@@ -11,22 +13,30 @@ import time
 from pathlib import Path
 
 
+def save(dest, obj):
+    tmp = dest.with_name(dest.name + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(obj))
+        os.replace(tmp, dest)
+    except OSError:
+        pass
+
+
 def main():
     try:
         data = json.load(sys.stdin)
     except ValueError:
         return
+    tmux = os.environ.get("CLAUDE_TMUX_SESSION")
+    pct = (data.get("context_window") or {}).get("used_percentage")
+    if tmux and not os.environ.get("CLAUDE_POOL"):   # pct None (fresh session) still overwrites an older session's value
+        save(Path.home() / f".claude/context-{tmux}.json",
+             {"ts": int(time.time()), "session_id": data.get("session_id") or "", "pct": pct})
     rl = data.get("rate_limits") or {}
     wins = {k: {f: rl[k].get(f) for f in ("used_percentage", "resets_at")}
             for k in ("five_hour", "seven_day") if isinstance(rl.get(k), dict)}
     if wins:
-        dest = Path.home() / ".claude/usage-snapshot.json"
-        tmp = dest.with_name(dest.name + f".{os.getpid()}.tmp")
-        try:
-            tmp.write_text(json.dumps({"ts": int(time.time()), **wins}))
-            os.replace(tmp, dest)
-        except OSError:
-            pass
+        save(Path.home() / ".claude/usage-snapshot.json", {"ts": int(time.time()), **wins})
     parts = [f"{lbl} {w['used_percentage']:.0f}%" for lbl, k in (("5h", "five_hour"), ("wk", "seven_day"))
              if (w := wins.get(k)) and w.get("used_percentage") is not None]
     print(" · ".join(parts))

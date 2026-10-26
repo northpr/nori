@@ -15,6 +15,6 @@ export "$CHAT_STATE_ENV=$HOME/.claude/channels/${CHAT_STATE_PREFIX}${inst}"   # 
 export CLAUDE_CODE_SUBAGENT_MODEL=sonnet                       # main session stays on the big model; subagents code on Sonnet
 mkdir -p "$HOME/projects/$inst"
 cd "$HOME/projects/$inst"
-args=(--channels "plugin:$CHAT_PLUGIN")
+args=(--channels "plugin:$CHAT_PLUGIN" --permission-mode auto)   # like pool sessions; pushes and merges still ask
 is_on REMOTE_CONTROL && args+=(--remote-control "$SERVER_NAME-$inst")
 exec claude "${args[@]}"
