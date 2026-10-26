@@ -6,3 +6,4 @@ A skill is a folder with a `SKILL.md` (front matter `name` + `description`, then
 - Skills specific to one repo belong in that repo's `.claude/skills/` (via a PR).
 - Sessions on the server may also save new skills directly to their own `~/.claude/skills/`, but only after you said yes in chat.
 - Never put secrets in a skill.
+- `plane-ticket` is for the laptop: it runs `ssh nori .local/bin/plane-ticket` and needs `PLANE=true` on the server.

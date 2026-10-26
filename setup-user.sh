@@ -24,7 +24,7 @@ export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 link "$R" "$HOME/nori"
 for f in "$S"/bin/*; do
   b=$(basename "$f"); nori_bin_wanted "$b" || continue
-  case "$b" in ops-bot|morning-summary|nightly-handoff|plane-backup|plane-offsite|work-offsite|set-token) continue ;; esac  # admin-only
+  case "$b" in ops-bot|morning-summary|nightly-handoff|plane-backup|plane-offsite|plane-ticket|work-offsite|set-token) continue ;; esac  # admin-only
   link "$f" "$HOME/.local/bin/$b"
 done
 for d in "$R"/skills/*/ "$R"/local/skills/*/; do
