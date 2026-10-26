@@ -172,6 +172,11 @@ class RenderTests(unittest.TestCase):
                                     'nori_bin_wanted agent-board && echo yes'], capture_output=True, text=True)
             self.assertEqual(r.stdout.strip(), want, conf)
 
+    def test_sessions_export_agent_board_env(self):
+        for script in ("claude-session", "claude-pool"):
+            text = (REPO / "server/bin" / script).read_text()
+            self.assertRegex(text, r'if is_on AGENT_BOARD.*\n\s*export AGENT_BOARD_CAP="\$AGENT_CAP" AGENT_BOARD_CAP_HIGH="\$AGENT_CAP_HIGH"', script)
+
     def test_admin_sudo(self):
         text = (self.render("recommended", CONFIGS["recommended"]) / "nori.resolved.conf").read_text()
         self.assertIn('ADMIN_SUDO="limited"', text)          # the default, whatever the preset

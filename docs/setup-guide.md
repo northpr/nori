@@ -337,7 +337,7 @@ One Claude + one chat bot. What changes:
 | `PREVIEWS`, `PREVIEW_PORT_START` | `preview` command (tailnet only) |
 | `RECALL` | search over past chats |
 | `BROWSER` | headless browser MCP |
-| `AGENT_BOARD`, `AGENT_CAP`, `AGENT_CAP_HIGH`, `AGENT_BOARD_CHAT` | agent board: at most `AGENT_CAP` (default 5) sub-agents at once, `AGENT_CAP_HIGH` (default 3) while plan usage is high (needs `OPS_BOT`); the board is posted to `AGENT_BOARD_CHAT` (empty = your DM with the area bot, or a group id) |
+| `AGENT_BOARD`, `AGENT_CAP`, `AGENT_CAP_HIGH`, `AGENT_BOARD_CHAT` | agent board: at most `AGENT_CAP` (default 5) sub-agents at once per session, `AGENT_CAP_HIGH` (default 3) while plan usage is high (needs `OPS_BOT`); the board is posted to `AGENT_BOARD_CHAT` (empty = your DM with the area bot, or a group id) |
 | `TAILNET_HOST` | filled in by `setup.sh` once Tailscale is up |
 
 ## Optional features
@@ -360,7 +360,7 @@ The newest 7 nights per area stay on the server in `~/backups/work/` and on the 
 
 **Recall (`RECALL=true`).** An index of past chats and handoffs per area, refreshed every 15 minutes; `recall "words"`.
 
-**Agent board (`AGENT_BOARD=true`).** A hook on Claude's sub-agents: it refuses a new agent when `AGENT_CAP` are already running (Claude is told to wait for one to finish), keeps one pinned `🤖 Agents` message in the chat up to date, and pings when an agent that ran 3+ minutes finishes. The session rules also get the agent team section (tiers, council, reviewers). The hook never blocks on its own errors, and stays silent in pool sessions. Needs `./setup.sh --restart`.
+**Agent board (`AGENT_BOARD=true`).** A hook on Claude's sub-agents: it refuses a new agent when `AGENT_CAP` are already running in that session (each session counts its own) (Claude is told to wait for one to finish), keeps one pinned `🤖 Agents` message in the chat up to date, and pings when an agent that ran 3+ minutes finishes. The session rules also get the agent team section (tiers, council, reviewers). The hook never blocks on its own errors, and stays silent in pool sessions. Needs `./setup.sh --restart`.
 
 **Browser (`BROWSER=true`).** Re-run bootstrap (installs Chromium into `/opt/ms-playwright`), `./setup.sh --restart`. Screenshots land in `~/shots/<area>/`.
 

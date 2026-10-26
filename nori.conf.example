@@ -100,8 +100,8 @@ CLAUDE_CODE_VERSION=""
 # BROWSER=true                    # headless browser MCP (Playwright + Chromium) for screenshots
 # AGENT_BOARD=true                # cap on parallel sub-agents + one pinned "Agents" message in your chat, and agent
 #                                 # team rules (tiers, council, reviewers) in the session rules
-# AGENT_CAP=5                     # (with AGENT_BOARD) most sub-agents running at once per session
-# AGENT_CAP_HIGH=3                # (with AGENT_BOARD) the lower cap while plan usage is high (5h >= 80% or weekly >= 90%);
+# AGENT_CAP=5                     # (with AGENT_BOARD) most sub-agents running at once, counted per session
+# AGENT_CAP_HIGH=3                # (with AGENT_BOARD) the lower cap (also per session) while plan usage is high (5h >= 80% or weekly >= 90%);
 #                                 # needs OPS_BOT, which writes the usage snapshot. Without it AGENT_CAP always applies
 # AGENT_BOARD_CHAT=""             # (with AGENT_BOARD) chat id the board is posted to. Empty = the first CHAT_ALLOWED_IDS
 #                                 # entry (your DM with the area bot). A group id (-100...) posts there instead

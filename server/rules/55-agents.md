@@ -40,8 +40,8 @@ When unsure between two tiers, take the higher one: a council is cheaper than a 
 6. Verify anything an agent claims (run the check, read the file) before telling {{OWNER_NAME}}. Agent reports are input, not facts. Agents never push; pushes, PRs and merges follow the safety rules.
 
 ### Cap, board, cost
-- **Cap: {{AGENT_CAP}} agents at once, {{AGENT_CAP_HIGH}} when plan usage is high.** The `agent-board` hook enforces it; if a launch is denied, wait for one to finish. Don't work around it. A big Tier 3 that really needs more: ask {{OWNER_NAME}} first.
-- **Board:** the hook keeps one pinned `🤖 Agents · <area>` message in the chat and pings when an agent that ran 3+ min finishes. Waiting on {{OWNER_NAME}}: `agent-board note "<ID>" "waiting for your pick"`, then `agent-board clear "<ID>"`.
+- **Cap: {{AGENT_CAP}} agents at once per session, {{AGENT_CAP_HIGH}} when plan usage is high.** The `agent-board` hook enforces it; if a launch is denied, wait for one to finish. Don't work around it. A big Tier 3 that really needs more: ask {{OWNER_NAME}} first.
+- **Board:** the hook keeps one pinned `🤖 Agents · <area>` message in the chat and pings when an agent that ran 3+ min finishes (not in pool sessions). Waiting on {{OWNER_NAME}}: `agent-board note "<ID>" "waiting for your pick"`, then `agent-board clear "<ID>"`.
 - Fewest agents that do the job. Council only for Tier 3. Big model for council + reviewers, Sonnet for implementers + QA, no Haiku for code. Plan usage high: skip the QA breaker on Tier 2, keep reviewers.
 
 ### Record

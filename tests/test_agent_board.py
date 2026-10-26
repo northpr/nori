@@ -35,7 +35,7 @@ class Board(unittest.TestCase):
         return out.getvalue()
 
     def pre(self, desc="task", **kw):
-        return self.hook({"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {"description": desc, **kw}})
+        return self.hook({"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": "s", "tool_input": {"description": desc, **kw}})
 
     def test_other_tools_are_ignored(self):
         self.hook({"hook_event_name": "PreToolUse", "tool_name": "TaskStop", "tool_input": {"description": "x"}})
@@ -208,10 +208,10 @@ class Board(unittest.TestCase):
         self.assertEqual(self.m.creds(), ("abc", ""))
 
     def test_dm_chat_posts_and_pins(self):
-        self.telegram(chat="1383")
+        self.telegram(chat="12345")
         self.pre("job"); self.start("a")
         self.assertEqual([c[0] for c in self.calls], ["sendMessage", "pinChatMessage"])
-        self.assertEqual(self.calls[0][1]["chat_id"], "1383")
+        self.assertEqual(self.calls[0][1]["chat_id"], "12345")
 
     def test_no_telegram_in_pool_or_without_creds(self):
         self.pre("a"); self.start("x"); self.stop("x")
@@ -231,6 +231,48 @@ class Board(unittest.TestCase):
     def test_hook_never_raises(self):
         with mock.patch.object(self.m, "locked", side_effect=OSError("boom")):
             self.assertEqual(self.pre(), "")
+
+    def test_stale_rows_from_killed_session_do_not_block(self):
+        for i in range(5):
+            self.hook({"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": "old", "tool_input": {"description": f"o{i}"}})
+            self.hook({"hook_event_name": "SubagentStart", "agent_id": f"o{i}", "agent_type": "general-purpose", "session_id": "old"})
+        deny = lambda sid: self.hook({"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": sid, "tool_input": {"description": "n"}})
+        self.assertIn("deny", deny("old"))
+        self.assertEqual(deny("NEW"), "")                       # restarted session starts clean
+        self.assertEqual(len(self.state()["pending"]), 1)
+        self.m.cli(["reset"])
+        self.assertEqual({r["status"] for r in self.state()["rows"]}, {"lost"})
+        self.assertEqual(self.state()["pending"], [])
+        self.assertEqual(deny("old"), "")
+
+    def test_start_matches_pending_of_own_session(self):
+        self.hook({"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": "a", "tool_input": {"description": "mine"}})
+        self.hook({"hook_event_name": "PreToolUse", "tool_name": "Agent", "session_id": "b", "tool_input": {"description": "theirs"}})
+        self.hook({"hook_event_name": "SubagentStart", "agent_id": "x", "agent_type": "general-purpose", "session_id": "b"})
+        self.assertEqual(self.state()["rows"][0]["label"], "theirs")
+
+    def test_http_not_done_under_lock(self):
+        self.telegram()
+        import fcntl
+        def probe(method, **p):
+            with open(Path(self.home, ".agent-board/lock"), "a") as lk:
+                fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)   # raises if the hook still holds the lock
+            return {"ok": True, "result": {"message_id": 7}}
+        self.m.tg = probe
+        self.pre("job"); self.start("a")
+        self.assertEqual(self.state()["board"]["message_id"], 7)
+
+    def test_edit_rate_limit_does_not_resend(self):
+        self.telegram(); self.pre("job"); self.start("a"); self.calls.clear()
+        for desc in ("Too Many Requests: retry after 5", "HTTP 502", "URLError"):
+            self.replies["editMessageText"] = {"ok": False, "description": desc}
+            self.t += 1; self.pre("x"); self.start(f"b{desc[:3]}")
+        self.assertEqual({c[0] for c in self.calls}, {"editMessageText"})
+        self.assertEqual(self.state()["board"]["message_id"], 7)
+        self.calls.clear()
+        self.replies["editMessageText"] = {"ok": False, "description": "Bad Request: message can't be edited"}
+        self.pre("y"); self.start("c")
+        self.assertIn("sendMessage", [c[0] for c in self.calls])
 
     def test_hook_fails_open_on_any_error(self):
         # a bug in the cap logic or the state file must never block an Agent call

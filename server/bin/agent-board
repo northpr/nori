@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
-"""Agent board: Claude Code hook + small CLI that tracks the session's sub-agents, caps parallel ones and keeps ONE pinned Telegram message up to date.
+"""Agent board: Claude Code hook + small CLI that tracks the session's sub-agents, caps parallel ones per session and keeps ONE pinned Telegram message up to date.
 Hook (`agent-board hook`, JSON on stdin): PreToolUse (matcher Agent|Task) enforces the cap, SubagentStart/SubagentStop update the board.
-Registered by render.py in settings.partial.json when AGENT_BOARD=true. Any error lets the call through. CLI: `note "<label|id>" "<text>"`, `clear "<label>"`, `show`, `--selftest`.
+Registered by render.py in settings.partial.json when AGENT_BOARD=true. Any error lets the call through. CLI: `note "<label|id>" "<text>"`, `clear "<label>"`, `show`, `reset`, `--selftest`.
 State: ~/.agent-board/state.json. Env (set by claude-session): AGENT_BOARD_CAP, AGENT_BOARD_CAP_HIGH, AGENT_BOARD_CHAT.
 Telegram is skipped in pool sessions (CLAUDE_POOL=1) or without token/chat."""
 import fcntl
@@ -110,7 +110,7 @@ def tg(method, **params):
     try:
         req = urllib.request.Request(f"https://api.telegram.org/bot{creds()[0]}/{method}", json.dumps(params).encode(),
                                      {"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=5) as r:
+        with urllib.request.urlopen(req, timeout=3) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         try:
@@ -121,39 +121,66 @@ def tg(method, **params):
         return {"ok": False, "description": type(e).__name__}
 
 
-def update(st):
+JOBS = []  # Telegram work queued under the lock, done by flush() after it is released (HTTP must not hold the flock)
+
+
+def update(st, ping=None):
     token, chat = creds()
     if os.environ.get("CLAUDE_POOL") == "1" or not token or not chat:
         return
-    b, text, today = st["board"], render(st), date.today().isoformat()
-    if b.get("message_id") and str(b.get("chat_id")) == chat and b.get("day") == today:
-        r = tg("editMessageText", chat_id=chat, message_id=b["message_id"], text=text)
-        if r.get("ok") or "not modified" in str(r.get("description", "")):
-            return
-    mid = (tg("sendMessage", chat_id=chat, text=text, disable_notification=True).get("result") or {}).get("message_id")
-    if mid:
-        if b.get("message_id") and str(b.get("chat_id")) == chat:
-            tg("unpinChatMessage", chat_id=chat, message_id=b["message_id"])
-        tg("pinChatMessage", chat_id=chat, message_id=mid, disable_notification=True)
-        st["board"] = {"chat_id": chat, "message_id": mid, "day": today}
+    JOBS.append({"chat": chat, "text": render(st), "board": dict(st["board"]), "day": date.today().isoformat(), "ping": ping})
+
+
+def push(j):
+    """Edit the pinned message, or post and pin a new one. Returns the new board dict, or None when nothing changed."""
+    chat, b = j["chat"], j["board"]
+    if b.get("message_id") and str(b.get("chat_id")) == chat and b.get("day") == j["day"]:
+        r = tg("editMessageText", chat_id=chat, message_id=b["message_id"], text=j["text"])
+        why = str(r.get("description", "")).lower()
+        if r.get("ok") or "not modified" in why:
+            return None
+        if not any(x in why for x in ("message to edit not found", "can't be edited", "message_id_invalid")):
+            return None  # 429, 5xx, network: skip, the next event retries
+    mid = (tg("sendMessage", chat_id=chat, text=j["text"], disable_notification=True).get("result") or {}).get("message_id")
+    if not mid:
+        return None
+    if b.get("message_id") and str(b.get("chat_id")) == chat:
+        tg("unpinChatMessage", chat_id=chat, message_id=b["message_id"])
+    tg("pinChatMessage", chat_id=chat, message_id=mid, disable_notification=True)  # a failed pin is not an error
+    return {"chat_id": chat, "message_id": mid, "day": j["day"]}
+
+
+def flush():
+    jobs, JOBS[:] = list(JOBS), []
+    for j in jobs:
+        nb = push(j)
+        if nb:
+            with locked() as st:
+                st["board"] = nb
+        if j["ping"]:
+            tg("sendMessage", chat_id=j["chat"], text=j["ping"])
 
 
 def pre(inp, st):
     if inp.get("tool_name") not in ("Agent", "Task"):  # the matcher is a regex, so TaskStop etc. could reach us
         return None
     cap, high = caps()
-    n = sum(r["status"] == "running" for r in st["rows"]) + len(st["pending"])
+    sid = inp.get("session_id") or ""
+    # per session: rows left running by a killed session (up to 3h) must not block a fresh one
+    n = sum(r["status"] == "running" and r.get("session") == sid for r in st["rows"]) + sum(p.get("session") == sid for p in st["pending"])
     if n >= cap:
         why = f"{n} agents already running (cap {cap}{', Max usage high' if high else ''}). Wait for one to finish, then start this one."
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": why}}
     ti = inp.get("tool_input") or {}
     st["pending"].append({"label": str(ti.get("description") or "agent")[:60], "type": ti.get("subagent_type") or "general-purpose",
-                          "model": ti.get("model") or "", "ts": now()})
+                          "model": ti.get("model") or "", "session": sid, "ts": now()})
 
 
 def start(inp, st):
     typ = inp.get("agent_type") or "agent"
-    p = next((p for p in st["pending"] if p["type"] == typ), None) or next(iter(st["pending"]), None)
+    # SubagentStart only tells us the agent type, so match the label by subagent_type, else the oldest pending of this session
+    mine = [p for p in st["pending"] if p.get("session") == (inp.get("session_id") or "")]
+    p = next((p for p in mine if p["type"] == typ), None) or next(iter(mine), None)
     if p:
         st["pending"].remove(p)
     st["rows"].append({"id": inp.get("agent_id") or "", "label": p["label"] if p else typ, "type": typ, "model": p["model"] if p else "",
@@ -166,10 +193,8 @@ def stop(inp, st):
     if not r:
         return
     r["status"], r["ended"] = "done", now()
-    update(st)
-    token, chat = creds()
-    if r["ended"] - r["started"] >= PING_MIN and token and chat and os.environ.get("CLAUDE_POOL") != "1":
-        tg("sendMessage", chat_id=chat, text=f"[{getpass.getuser()}] ✅ {r['label']} finished · {mins(r['ended'] - r['started'])}")
+    long = r["ended"] - r["started"] >= PING_MIN
+    update(st, f"[{getpass.getuser()}] ✅ {r['label']} finished · {mins(r['ended'] - r['started'])}" if long else None)
 
 
 def hook():
@@ -179,10 +204,11 @@ def hook():
         if fn:
             with locked() as st:
                 out = fn(inp, st)
+            flush()
             if out:
                 print(json.dumps(out))
     except Exception:
-        pass
+        JOBS.clear()
 
 
 def find(st, key):
@@ -194,6 +220,13 @@ def cli(args):
     if args[0] == "show":
         with locked() as st:
             print(render(st))
+    elif args[0] == "reset":  # e.g. after a restart: running rows from a session that no longer exists
+        with locked() as st:
+            for r in st["rows"]:
+                if r["status"] == "running":
+                    r["status"], r["ended"] = "lost", now()
+            st["pending"] = []
+            update(st)
     elif args[0] == "note" and len(args) == 3:
         with locked() as st:
             r = find(st, args[1])
@@ -213,6 +246,7 @@ def cli(args):
     else:
         print(__doc__.splitlines()[2], file=sys.stderr)
         return 2
+    flush()
     return 0
 
 
