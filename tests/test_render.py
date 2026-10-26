@@ -1,6 +1,7 @@
 import json
 import hashlib
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -134,6 +135,48 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("statusLine", json.loads((out / "claude/settings.partial.json").read_text()))
         self.assertNotIn("ask-owner", (out / "CLAUDE.md").read_text())
 
+    def test_agent_board(self):
+        hooks = lambda name, conf: json.loads((self.render(name, conf) / "claude/settings.partial.json").read_text())["hooks"]
+        cmd = [{"type": "command", "command": "$HOME/.local/bin/agent-board hook"}]
+        for name in ("recommended", "full-two-areas"):
+            self.assertEqual(self.resolved(CONFIGS[name]).get("AGENT_BOARD"), "true", name)
+            h = hooks(name, CONFIGS[name])
+            self.assertIn({"matcher": "Agent|Task", "hooks": cmd}, h["PreToolUse"])
+            self.assertEqual((h["SubagentStart"], h["SubagentStop"]), ([{"hooks": cmd}], [{"hooks": cmd}]))
+            self.assertEqual([e["matcher"] for e in h["PreToolUse"]][:2], ["*", "Bash"])   # guards stay first
+            rules = (self.render(name, CONFIGS[name]) / "CLAUDE.md").read_text()
+            self.assertIn("Agent teams", rules)
+            self.assertIn("Cap: 5 agents at once per session, 3 when plan usage is high", rules)
+        self.assertEqual(self.resolved(CONFIGS["starter"]).get("AGENT_BOARD"), "false")
+        h = hooks("starter", CONFIGS["starter"])
+        self.assertEqual((h["SubagentStart"], h["SubagentStop"]), ([], []))   # clears hooks from an earlier run
+        self.assertFalse([e for e in h["PreToolUse"] if "agent-board" in json.dumps(e)])
+        self.assertNotIn("Agent teams", (self.render("starter", CONFIGS["starter"]) / "CLAUDE.md").read_text())
+        # flag override both ways, and the numbers reach the rules and the resolved conf
+        on = CONFIGS["starter"] + 'AGENT_BOARD=true\nAGENT_CAP=2\nAGENT_CAP_HIGH=1\nAGENT_BOARD_CHAT="-1001"\n'
+        r = self.resolved(on)
+        self.assertEqual((r["AGENT_BOARD"], r["AGENT_CAP"], r["AGENT_CAP_HIGH"], r["AGENT_BOARD_CHAT"]), ("true", "2", "1", "-1001"))
+        self.assertIn("Cap: 2 agents at once per session, 1 when", (self.render("on", on) / "CLAUDE.md").read_text())
+        off = CONFIGS["recommended"] + "AGENT_BOARD=false\n"
+        self.assertNotIn("agent-board", json.dumps(hooks("off", off)))
+        h = hooks("off", off)
+        self.assertEqual((h["SubagentStart"], h["SubagentStop"]), ([], []))
+        self.assertEqual(self.resolved(CONFIGS["recommended"]).get("AGENT_CAP"), "5")
+        self.assertEqual(self.resolved(CONFIGS["recommended"]).get("AGENT_CAP_HIGH"), "3")
+
+    def test_agent_board_script_installed_only_when_on(self):
+        for conf, want in (('AGENT_BOARD=true', "yes"), ('AGENT_BOARD=false', ""), ('PRESET=starter', ""), ('PRESET=recommended', "yes")):
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / "nori.conf").write_text(conf + "\n")
+                r = subprocess.run(["bash", "-c", f'NORI_ROOT={REPO} NORI_CONF={tmp}/nori.conf; . "{REPO}/scripts/conf.sh" && '
+                                    'nori_bin_wanted agent-board && echo yes'], capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), want, conf)
+
+    def test_sessions_export_agent_board_env(self):
+        for script in ("claude-session", "claude-pool"):
+            text = (REPO / "server/bin" / script).read_text()
+            self.assertRegex(text, r'if is_on AGENT_BOARD.*\n\s*export AGENT_BOARD_CAP="\$AGENT_CAP" AGENT_BOARD_CAP_HIGH="\$AGENT_CAP_HIGH"', script)
+
     def test_admin_sudo(self):
         text = (self.render("recommended", CONFIGS["recommended"]) / "nori.resolved.conf").read_text()
         self.assertIn('ADMIN_SUDO="limited"', text)          # the default, whatever the preset
@@ -155,6 +198,9 @@ class RenderTests(unittest.TestCase):
                             "bad area WORK_BACKUP": BASE + 'AREAS="main"\nAREA_main_WORK_BACKUP=no\n',
                             "bad BACKUP_REPO": BASE + 'AREAS="main"\nBACKUP_REPO="not a repo"\n',
                             "admin sudo": BASE + 'AREAS="main"\nADMIN_SUDO="sometimes"\n',
+                            "bad AGENT_BOARD": BASE + 'AREAS="main"\nAGENT_BOARD=maybe\n',
+                            "bad AGENT_CAP": BASE + 'AREAS="main"\nAGENT_CAP=0\n',
+                            "bad AGENT_BOARD_CHAT": BASE + 'AREAS="main"\nAGENT_BOARD_CHAT="@me"\n',
                             "bad PERM_CARDS": BASE + 'AREAS="main"\nPERM_CARDS=maybe\n',
                             "PERM_CARDS without Ops bot": BASE + 'AREAS="main"\nOPS_BOT=false\nPERM_CARDS=true\n'}.items():
             with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:

@@ -13,6 +13,10 @@ export NORI_AREA="$inst"                                       # which area this
 export CLAUDE_TMUX_SESSION="claude-$inst"                      # used by cc-slash
 export "$CHAT_STATE_ENV=$HOME/.claude/channels/${CHAT_STATE_PREFIX}${inst}"   # bot token + allowlist per area
 export CLAUDE_CODE_SUBAGENT_MODEL=sonnet                       # main session stays on the big model; subagents code on Sonnet
+if is_on AGENT_BOARD; then                                     # read by the agent-board hook
+  export AGENT_BOARD_CAP="$AGENT_CAP" AGENT_BOARD_CAP_HIGH="$AGENT_CAP_HIGH"
+  export AGENT_BOARD_CHAT="${AGENT_BOARD_CHAT:-${CHAT_ALLOWED_IDS%%,*}}"   # default: first allowed id = DM with the bot
+fi
 mkdir -p "$HOME/projects/$inst"
 cd "$HOME/projects/$inst"
 args=(--channels "plugin:$CHAT_PLUGIN" --permission-mode auto)   # like pool sessions; pushes and merges still ask
