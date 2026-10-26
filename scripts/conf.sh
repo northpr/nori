@@ -14,12 +14,12 @@ set -a
 : "${PRESET:=recommended}"
 case "$PRESET" in
   starter) _nori_preset="OPS_BOT=false OPS_ASK=false PERM_CARDS=false DIGEST=false HANDOFF=true POOL_SESSIONS=false POOL_CAPACITY=4
-                         PLANE=false PREVIEWS=false RECALL=false BROWSER=false" ;;
+                         PLANE=false PREVIEWS=false RECALL=false BROWSER=false AGENT_BOARD=false" ;;
   full)    _nori_preset="OPS_BOT=true OPS_ASK=true PERM_CARDS=true DIGEST=true HANDOFF=true POOL_SESSIONS=true POOL_CAPACITY=8
-                         PLANE=true PREVIEWS=true RECALL=true BROWSER=true" ;;
+                         PLANE=true PREVIEWS=true RECALL=true BROWSER=true AGENT_BOARD=true" ;;
   *)       # recommended (an unknown value is reported by render.py)
            _nori_preset="OPS_BOT=true OPS_ASK=true PERM_CARDS=true DIGEST=true HANDOFF=true POOL_SESSIONS=true POOL_CAPACITY=4
-                         PLANE=false PREVIEWS=true RECALL=true BROWSER=true" ;;
+                         PLANE=false PREVIEWS=true RECALL=true BROWSER=true AGENT_BOARD=true" ;;
 esac
 for _kv in $_nori_preset; do _n=${_kv%%=*}; [[ -n ${!_n:-} ]] || printf -v "$_n" '%s' "${_kv#*=}"; done
 # one private backup repo for everything; PLANE_BACKUP_REPO is its older name and still works
@@ -37,6 +37,9 @@ fi
 : "${HANDOFF_TIME:=03:45}" "${DIGEST_TIME:=08:00}" "${DIGEST_LANGUAGE:=English}"
 : "${REMOTE_CONTROL:=true}" "${AUTO_UPDATES:=true}" "${AUTO_REBOOT_TIME:=04:30}" "${EXTRA_ASK_PERMISSIONS:=}"
 : "${PLANE_WORKSPACE:=main}" "${PLANE_BACKUP_REPO:=}" "${PREVIEW_PORT_START:=8100}" "${TAILNET_HOST:=}"
+# agent board: parallel sub-agent cap (AGENT_CAP_HIGH is used while plan usage is high, needs OPS_BOT) and
+# the chat it posts the pinned board to (empty = the first CHAT_ALLOWED_IDS entry, i.e. your DM with the bot)
+: "${AGENT_CAP:=5}" "${AGENT_CAP_HIGH:=3}" "${AGENT_BOARD_CHAT:=}"
 # not preset-dependent: scoped passwordless sudo for the admin (bootstrap.sh, docs/setup-guide.md step 3)
 : "${ADMIN_SUDO:=limited}"
 # opt-in in every preset: prefer IPv4 for outgoing connections (/etc/gai.conf), for a flaky IPv6 route (docs/troubleshooting.md)
@@ -69,13 +72,14 @@ area_home() { getent passwd "$1" | cut -d: -f6; }
 # nori_bin_wanted <script name> -> should this helper script be installed with the current flags?
 nori_bin_wanted() {
   case "$1" in
-    plane-mcp)                         is_on PLANE ;;
+    plane-mcp|plane-ticket)            is_on PLANE ;;
     plane-backup)                      is_on PLANE ;;
     plane-offsite)                     is_on PLANE && is_on PLANE_OFFSITE_BACKUP ;;
     work-backup|work-offsite)          is_on WORK_BACKUP ;;
     preview)                           is_on PREVIEWS ;;
     recall|recall-index)               is_on RECALL ;;
     browser-mcp)                       is_on BROWSER ;;
+    agent-board)                       is_on AGENT_BOARD ;;
     morning-summary)                   is_on DIGEST ;;
     nightly-handoff)                   is_on HANDOFF ;;
     claude-pool)                       is_on POOL_SESSIONS ;;

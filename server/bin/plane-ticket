@@ -1,0 +1,109 @@
+#!/usr/bin/env -S python3 -I
+"""plane-ticket: create a Plane ticket from the command line (used over ssh by laptop sessions; PLANE=true only).
+  plane-ticket --project APP [--priority high] [--label bug] [--label needs-me] < ticket.txt
+Title on the first line of stdin, description after it.
+Keep free text out of the command line: ssh joins argv into one string for the remote shell, so `;`, `$(...)`
+or backticks in an argument would run on the server. The regexes below only reject malformed project and label
+values; the real guard is that the caller never puts the title or description in argv.
+Uses the Ops bot's Plane client (workspace, URL and token from nori.conf and ~/.plane-mcp.env).
+Prints the new key (e.g. APP-14)."""
+import argparse, html, re, sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+DESC_MAX = 20000
+TITLE_MAX = 255
+
+
+def _arg(pattern, what):
+    def check(v):
+        if not re.fullmatch(pattern, v):
+            raise argparse.ArgumentTypeError(f"invalid {what}")
+        return v
+    return check
+
+
+def parse_input(text):
+    """First non-empty line -> title (whitespace collapsed, <=255); the rest -> description."""
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip():
+            return " ".join(line.split())[:TITLE_MAX], "".join(lines[i + 1:])
+    return "", ""
+
+
+def to_html(text):
+    out, para, items = [], [], []
+    def flush():
+        if para: out.append("<p>" + html.escape(" ".join(para)) + "</p>"); para.clear()
+        if items: out.append("<ul>" + "".join(f"<li>{html.escape(i)}</li>" for i in items) + "</ul>"); items.clear()
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            flush()
+        elif s.startswith("- "):
+            if para: flush()
+            items.append(s[2:].strip())
+        else:
+            if items: flush()
+            para.append(s)
+    flush()
+    return "".join(out)
+
+
+def load_ops_bot():
+    argv, sys.argv = sys.argv, ["ops-bot", "lib"]
+    try:
+        return SourceFileLoader("ob", str(Path.home() / ".local/bin/ops-bot")).load_module()
+    finally:
+        sys.argv = argv
+
+
+def main(argv=None, text=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project", required=True, type=_arg(r"[A-Z][A-Z0-9]{0,9}", "project"))
+    ap.add_argument("--priority", default="none", choices=["none", "low", "medium", "high", "urgent"])
+    ap.add_argument("--label", action="append", default=[], type=_arg(r"[a-z][a-z-]{0,30}", "label"))
+    a = ap.parse_args(argv)
+    if text is None:
+        text = sys.stdin.read() if not sys.stdin.isatty() else ""
+    title, desc = parse_input(text)
+    if not title:
+        print("error: title is empty (first stdin line is the title)", file=sys.stderr); return 2
+    if len(desc) > DESC_MAX:
+        print(f"error: description is over {DESC_MAX} characters", file=sys.stderr); return 2
+    try:
+        return create(a, title, desc, load_ops_bot())
+    except FileNotFoundError as e:
+        if "plane-mcp.env" in str(e):
+            print("Plane token missing: run set-token plane", file=sys.stderr); return 1
+        raise
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr); return 1
+
+
+def create(a, title, desc, ob):
+    proj = a.project
+    cat = ob.plane_catalog([proj]).get(proj)
+    if not cat:
+        valid = sorted(p["identifier"] for p in ob.plane("GET", "/projects/")["results"])
+        print(f"unknown project '{a.project}'; valid: " + ", ".join(valid), file=sys.stderr); return 2
+    if any(l not in cat["labels"] for l in a.label):   # the catalog is cached: refetch once before giving up
+        try:
+            cat = ob._fetch_catalog().get(proj) or cat
+        except RuntimeError:
+            pass
+    labels = []
+    for l in a.label:
+        if l in cat["labels"]: labels.append(cat["labels"][l])
+        else: print(f"warning: no label '{l}' in {proj}, ignored", file=sys.stderr)
+    body = {"name": title, "description_html": to_html(desc), "priority": a.priority, "labels": labels}
+    if cat.get("todo"):
+        body["state"] = cat["todo"]
+    it = ob.plane("POST", f"/projects/{cat['id']}/work-items/", body)
+    print(f"{proj}-{it['sequence_id']}")
+    return 0
+
+
+if __name__ == "__main__" and (len(sys.argv) < 2 or sys.argv[1] != "lib"):
+    sys.exit(main())

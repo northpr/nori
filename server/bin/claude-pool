@@ -18,6 +18,9 @@ mkdir -p "$HOME/.claude/channels/pool-no-chat"
 export NORI_AREA="$inst"                                       # which area this is (recall, preview, browser-mcp)
 export CLAUDE_POOL=1                                           # the rules tell pool sessions apart by this
 export CLAUDE_CODE_SUBAGENT_MODEL=sonnet
+if is_on AGENT_BOARD; then                                     # read by the agent-board hook (no chat: the board stays silent here)
+  export AGENT_BOARD_CAP="$AGENT_CAP" AGENT_BOARD_CAP_HIGH="$AGENT_CAP_HIGH"
+fi
 cd "$HOME/projects/$inst"
 # A browser login (~/.claude/.credentials.json) outranks nothing: the setup-token env var wins over it, so drop the var.
 if [[ -f "$HOME/.claude/.credentials.json" ]]; then unset CLAUDE_CODE_OAUTH_TOKEN; fi
