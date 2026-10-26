@@ -1,11 +1,10 @@
 #!/usr/bin/env -S python3 -I
 """plane-ticket: create a Plane ticket from the command line (used over ssh by laptop sessions; PLANE=true only).
-  plane-ticket --project APP [--priority high] [--label bug] [--label needs-me] <<'EOT'
-  Title on the first line
-  description after it
-  EOT
-No free text on the command line (ssh joins argv into a shell command): the first non-empty stdin line is the title.
-Project identifiers and label names are checked against the pattern and then against Plane itself.
+  plane-ticket --project APP [--priority high] [--label bug] [--label needs-me] < ticket.txt
+Title on the first line of stdin, description after it.
+Keep free text out of the command line: ssh joins argv into one string for the remote shell, so `;`, `$(...)`
+or backticks in an argument would run on the server. The regexes below only reject malformed project and label
+values; the real guard is that the caller never puts the title or description in argv.
 Uses the Ops bot's Plane client (workspace, URL and token from nori.conf and ~/.plane-mcp.env).
 Prints the new key (e.g. APP-14)."""
 import argparse, html, re, sys
@@ -73,12 +72,27 @@ def main(argv=None, text=None):
         print("error: title is empty (first stdin line is the title)", file=sys.stderr); return 2
     if len(desc) > DESC_MAX:
         print(f"error: description is over {DESC_MAX} characters", file=sys.stderr); return 2
-    ob = load_ops_bot()
+    try:
+        return create(a, title, desc, load_ops_bot())
+    except FileNotFoundError as e:
+        if "plane-mcp.env" in str(e):
+            print("Plane token missing: run set-token plane", file=sys.stderr); return 1
+        raise
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr); return 1
+
+
+def create(a, title, desc, ob):
     proj = a.project
     cat = ob.plane_catalog([proj]).get(proj)
     if not cat:
         valid = sorted(p["identifier"] for p in ob.plane("GET", "/projects/")["results"])
         print(f"unknown project '{a.project}'; valid: " + ", ".join(valid), file=sys.stderr); return 2
+    if any(l not in cat["labels"] for l in a.label):   # the catalog is cached: refetch once before giving up
+        try:
+            cat = ob._fetch_catalog().get(proj) or cat
+        except RuntimeError:
+            pass
     labels = []
     for l in a.label:
         if l in cat["labels"]: labels.append(cat["labels"][l])

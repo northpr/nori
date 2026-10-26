@@ -60,11 +60,11 @@ class Validation(unittest.TestCase):
     def test_bad_priority(self):
         self.exits_2(["--project", "APP", "--priority", "huge"])
 
-    def test_bad_project(self):
+    def test_rejects_malformed_project(self):
         self.exits_2(["--project", "APP; rm -rf /"])
         self.exits_2(["--project", "app"])
 
-    def test_bad_label(self):
+    def test_rejects_malformed_label(self):
         self.exits_2(["--project", "APP", "--label", "x$(id)"])
         self.exits_2(["--project", "APP", "--label", "Bug"])
 
@@ -75,9 +75,10 @@ class Validation(unittest.TestCase):
 class Create(unittest.TestCase):
     """main() with the Ops bot's Plane client replaced by a fake: nothing leaves the process."""
 
-    def run_main(self, argv, text, cat=None):
+    def run_main(self, argv, text, cat=None, fresh=None, ob=None):
         pt = load()
-        calls = []
+        calls, fetches = [], []
+        self.fetches = fetches
 
         class FakeOb:
             @staticmethod
@@ -85,12 +86,17 @@ class Create(unittest.TestCase):
                 return {"APP": cat} if cat else {}
 
             @staticmethod
+            def _fetch_catalog():
+                fetches.append(1)
+                return {"APP": fresh or cat}
+
+            @staticmethod
             def plane(method, path, body=None):
                 calls.append((method, path, body))
                 if method == "GET":
                     return {"results": [{"identifier": "APP"}, {"identifier": "WEB"}]}
                 return {"sequence_id": 14}
-        pt.load_ops_bot = lambda: FakeOb
+        pt.load_ops_bot = lambda: ob or FakeOb
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = pt.main(argv, text)
@@ -108,6 +114,23 @@ class Create(unittest.TestCase):
         self.assertEqual(body["name"], "Fix X")
         self.assertEqual((body["priority"], body["labels"], body["state"]), ("high", ["L1"], "S1"))
         self.assertEqual(body["description_html"], "<ul><li>a</li></ul><p>body &amp; more</p>")
+
+    def test_label_miss_refetches_catalog_once(self):
+        fresh = {**self.CAT, "labels": {**self.CAT["labels"], "idea": "L9"}}
+        rc, out, err, calls = self.run_main(["--project", "APP", "--label", "idea"], "T", self.CAT, fresh)
+        self.assertEqual((rc, calls[-1][2]["labels"], self.fetches, err), (0, ["L9"], [1], ""))
+        rc, out, err, calls = self.run_main(["--project", "APP", "--label", "bug"], "T", self.CAT)
+        self.assertEqual(self.fetches, [])   # no miss, no refetch
+
+    def test_missing_token_file_is_a_clean_error(self):
+        class NoToken:
+            @staticmethod
+            def plane_catalog(only=None):
+                raise FileNotFoundError(2, "No such file", "/home/x/.plane-mcp.env")
+        rc, out, err, calls = self.run_main(["--project", "APP"], "T", ob=NoToken)
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("Plane token missing: run set-token plane", err)
+        self.assertNotIn("Traceback", err)
 
     def test_unknown_project_lists_valid_ones(self):
         rc, out, err, calls = self.run_main(["--project", "ZZZ"], "T", None)
