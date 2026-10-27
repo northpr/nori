@@ -3,8 +3,9 @@
 # a few seconds later so it lands after the current reply finishes.
 cmd="$*"
 case "$cmd" in
-  "/clear"|"/compact"|"/model opus"|"/model sonnet"|"/model haiku") ;;
-  *) echo "cc-slash: \"$cmd\" is not allowed (allowed: /clear /compact /model opus|sonnet|haiku)" >&2; exit 2 ;;
+  "/clear"|"/compact"|"/model opus"|"/model sonnet"|"/model haiku"|\
+  "/effort low"|"/effort medium"|"/effort high"|"/effort xhigh"|"/effort max") ;;
+  *) echo "cc-slash: \"$cmd\" is not allowed (allowed: /clear /compact /model opus|sonnet|haiku /effort low|medium|high|xhigh|max)" >&2; exit 2 ;;
 esac
 target="${CLAUDE_TMUX_SESSION:-}"   # set by claude-session for each area
 [ -n "$target" ] || { echo "cc-slash: only works inside a Claude session started by claude-session" >&2; exit 2; }
